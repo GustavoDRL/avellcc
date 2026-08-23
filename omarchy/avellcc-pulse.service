@@ -1,0 +1,28 @@
+[Unit]
+Description=Pulse the Avell chassis lightbar in time with the music
+Documentation=https://github.com/hugo-andrade/avellcc
+After=dbus.socket
+Requires=dbus.socket
+# cava captures from PipeWire, and the daemon reads the theme Omarchy publishes
+# when the session starts. Neither was ordered before, so at login this could
+# run before either existed. The daemon now waits for the theme rather than
+# failing, but ordering it properly means it does not have to.
+#
+# graphical-session.target is what the machine's other user units use
+# (metalcore-nowplaying, voxtype). It is a session target, not a system one, so
+# there is no path back to power-profiles-daemon and none of the ordering-cycle
+# risk that bit us there.
+After=graphical-session.target pipewire.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/avellcc lightbar --pulse
+Restart=always
+RestartSec=5
+# On the way down the daemon hands the bar back to the theme colour; that is
+# two HID packets, but give it room rather than have systemd SIGKILL it mid-write.
+TimeoutStopSec=10
+
+[Install]
+WantedBy=graphical-session.target

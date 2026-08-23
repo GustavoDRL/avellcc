@@ -1,0 +1,47 @@
+#!/bin/bash
+#
+# Paint the keyboard backlight with the current Omarchy theme's colour.
+#
+# Runs from ~/.config/omarchy/hooks/theme-set.d/ after every `omarchy theme set`.
+# Omarchy ships omarchy-theme-set-keyboard, but it only covers ASUS ROG and
+# Framework 16 keyboards; this covers the Avell Storm 470 (ITE 8291) via avellcc.
+#
+# Tunables, overridable from the environment:
+#   AVELLCC_THEME_COLOR_KEY        colors.toml key to read      (default: accent)
+#   AVELLCC_THEME_BRIGHTNESS       backlight level, 0-10        (default: 8)
+#   AVELLCC_THEME_USE_KEYBOARD_RGB honour the theme's           (default: 0)
+#                                  keyboard.rgb when it exists
+
+set -uo pipefail
+
+THEME_DIR="$HOME/.local/state/omarchy/current/theme"
+COLORS_TOML="$THEME_DIR/colors.toml"
+KEYBOARD_RGB="$THEME_DIR/keyboard.rgb"
+
+COLOR_KEY="${AVELLCC_THEME_COLOR_KEY:-accent}"
+BRIGHTNESS="${AVELLCC_THEME_BRIGHTNESS:-8}"
+USE_KEYBOARD_RGB="${AVELLCC_THEME_USE_KEYBOARD_RGB:-0}"
+
+# Nothing to do when the tool or the theme is missing. Hooks must never fail
+# the theme switch, so every exit here is a success.
+command -v avellcc >/dev/null 2>&1 || exit 0
+[[ -f $COLORS_TOML ]] || exit 0
+
+color=""
+
+# Only one stock theme ships keyboard.rgb today, and its value does not track
+# the theme's palette, so honouring it is opt-in.
+if [[ $USE_KEYBOARD_RGB == 1 && -f $KEYBOARD_RGB ]]; then
+	color=$(tr -d '#[:space:]' <"$KEYBOARD_RGB")
+fi
+
+if [[ -z $color ]]; then
+	color=$(sed -nE "s/^${COLOR_KEY}[[:space:]]*=[[:space:]]*\"?#?([0-9A-Fa-f]{6})\"?.*/\1/p" \
+		"$COLORS_TOML" | head -n 1)
+fi
+
+[[ $color =~ ^[0-9A-Fa-f]{6}$ ]] || exit 0
+
+avellcc keyboard --color "#$color" --brightness "$BRIGHTNESS" >/dev/null 2>&1
+
+exit 0

@@ -11,6 +11,12 @@ Linux control center for **Avell Storm 590X** (Clevo barebone) laptops. Per-key 
 
 Single static binary, zero dependencies.
 
+> **This fork** also supports the **Avell Storm 470** (ITE 8291 controller) and
+> integrates the keyboard colour with the Omarchy theme system. Fan readings on
+> that model need the `uniwill_laptop` module, and fan speed control is not
+> available — see [`docs/storm470-fans.md`](docs/storm470-fans.md). Start at
+> [`docs/storm470-ite8291.md`](docs/storm470-ite8291.md).
+
 ## Hardware
 
 | Component | Details |

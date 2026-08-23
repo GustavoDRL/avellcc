@@ -1,0 +1,49 @@
+#!/bin/bash
+#
+# Re-apply the saved avellcc keyboard state at login and after every resume.
+#
+# The ITE 8291 loses its LED state across suspend. systemd's user manager has
+# no sleep.target, so this mirrors what omarchy-system-sleep-monitor does and
+# watches logind's PrepareForSleep signal on the system bus. Doing it in the
+# user session avoids needing a root-owned /usr/lib/systemd/system-sleep hook.
+
+set -uo pipefail
+
+AVELLCC="${AVELLCC_BIN:-$HOME/.local/bin/avellcc}"
+# Give the USB HID device time to re-enumerate before talking to it.
+RESUME_DELAY="${AVELLCC_RESUME_DELAY:-2}"
+
+reload() {
+	"$AVELLCC" reload >/dev/null 2>&1 || true
+}
+
+# consume_sleep_events reads dbus-monitor output on stdin. PrepareForSleep
+# carries true just before suspending and false on resume; only the resume edge
+# needs action. Kept as a function so it can be exercised without suspending,
+# via the --consume-stdin flag below.
+consume_sleep_events() {
+	local line
+	while IFS= read -r line; do
+		case $line in
+		*"boolean false"*)
+			sleep "$RESUME_DELAY"
+			reload
+			;;
+		esac
+	done
+}
+
+# Test entry point: pipe recorded dbus-monitor output in to check the parsing.
+if [[ ${1:-} == "--consume-stdin" ]]; then
+	consume_sleep_events
+	exit 0
+fi
+
+command -v "$AVELLCC" >/dev/null 2>&1 || exit 0
+
+# Restore once at start, which covers login and any restart of this service.
+reload
+
+dbus-monitor --system \
+	"type='signal',sender='org.freedesktop.login1',interface='org.freedesktop.login1.Manager',member='PrepareForSleep'" |
+	consume_sleep_events

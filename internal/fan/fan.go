@@ -2,6 +2,7 @@
 package fan
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ type Backend string
 
 const (
 	BackendTuxedoIO Backend = "tuxedo_io"
+	BackendECRAM    Backend = "ec_ram"
 	BackendACPICall Backend = "acpi_call"
 	BackendHwmon    Backend = "hwmon"
 	BackendNone     Backend = "none"
@@ -33,30 +35,59 @@ type FanStatus map[string]int
 // FanController reads and controls fan speeds.
 type FanController struct {
 	backend Backend
+
+	// acpiMethod is the ACPI path of the fan method, discovered at construction
+	// rather than hard-coded, because it differs between firmwares.
+	acpiMethod string
+	// acpiVerified records whether that path actually answered a probe. Probing
+	// needs root, so an unverified path is not the same as a missing one.
+	acpiVerified bool
+
+	// ecPath and ecRegs drive the embedded-controller backend. ecRegs is only
+	// ever filled from a map measured on this exact model.
+	ecPath string
+	ecRegs ecRegisters
 }
 
 // NewFanController creates a new controller with auto-detected backend.
 func NewFanController() *FanController {
-	return &FanController{backend: detectBackend()}
+	fc := &FanController{}
+
+	if _, err := os.Stat("/dev/tuxedo_io"); err == nil {
+		fc.backend = BackendTuxedoIO
+		return fc
+	}
+
+	if _, err := os.Stat("/proc/acpi/call"); err == nil {
+		path, verified := findACPIFanMethod()
+		if path != "" {
+			fc.backend, fc.acpiMethod, fc.acpiVerified = BackendACPICall, path, verified
+			return fc
+		}
+	}
+
+	matches, _ := filepath.Glob("/sys/class/hwmon/hwmon*/fan*_input")
+	if len(matches) > 0 {
+		fc.backend = BackendHwmon
+		return fc
+	}
+
+	// The EC comes last: it reports readings but no control, so anything above
+	// is a better answer when it is present.
+	if regs, ok := ecRegisterMaps[boardName()]; ok {
+		if path := ecIOPath(); path != "" {
+			fc.backend, fc.ecPath, fc.ecRegs = BackendECRAM, path, regs
+			return fc
+		}
+	}
+
+	fc.backend = BackendNone
+	return fc
 }
 
 // Backend returns the detected backend name.
 func (fc *FanController) Backend() Backend {
 	return fc.backend
-}
-
-func detectBackend() Backend {
-	if _, err := os.Stat("/dev/tuxedo_io"); err == nil {
-		return BackendTuxedoIO
-	}
-	if _, err := os.Stat("/proc/acpi/call"); err == nil {
-		return BackendACPICall
-	}
-	matches, _ := filepath.Glob("/sys/class/hwmon/hwmon*/fan*_input")
-	if len(matches) > 0 {
-		return BackendHwmon
-	}
-	return BackendNone
 }
 
 // GetFanRPM returns current fan RPMs and duty cycles.
@@ -68,6 +99,8 @@ func (fc *FanController) GetFanRPM() FanStatus {
 		return fc.hwmonGetFans()
 	case BackendTuxedoIO:
 		return fc.hwmonGetFans()
+	case BackendECRAM:
+		return fc.ecFans()
 	}
 	return FanStatus{}
 }
@@ -148,7 +181,10 @@ func (fc *FanController) SetFanSpeed(fanID, dutyPercent int) error {
 	case BackendACPICall:
 		return fc.acpiSetFan(fanID, duty)
 	default:
-		return fmt.Errorf("backend '%s' does not support fan control; install acpi_call: sudo modprobe acpi_call", fc.backend)
+		if hint := fc.BackendHint(); hint != "" {
+			return fmt.Errorf("backend '%s' does not support fan control.\n%s", fc.backend, hint)
+		}
+		return fmt.Errorf("backend '%s' does not support fan control", fc.backend)
 	}
 }
 
@@ -156,7 +192,7 @@ func (fc *FanController) SetFanSpeed(fanID, dutyPercent int) error {
 func (fc *FanController) SetAuto() error {
 	switch fc.backend {
 	case BackendACPICall:
-		_, err := acpiCall(0x69, 0x0F)
+		_, err := fc.acpiCall(0x69, 0x0F)
 		return err
 	default:
 		return fmt.Errorf("backend '%s' does not support fan control", fc.backend)
@@ -165,30 +201,102 @@ func (fc *FanController) SetAuto() error {
 
 // --- acpi_call backend ---
 
-func acpiCall(method, arg int) (int, error) {
-	cmd := fmt.Sprintf("\\_SB.WMI.WMBB 0x00 %#x %#x", method, arg)
-	if err := os.WriteFile("/proc/acpi/call", []byte(cmd), 0); err != nil {
+// acpiFanMethods lists the ACPI paths where the Clevo-style fan method has been
+// found. Upstream hard-coded the first one. That is not portable: the method
+// lives under whatever name the vendor gave its PNP0C14 WMI device, and
+// acpi_call reports a missing method by writing "Error: AE_NOT_FOUND" into its
+// own output instead of failing the write — so a wrong path reads back as a
+// successful call that returned zero.
+var acpiFanMethods = []string{
+	"\\_SB.WMI.WMBB",
+	"\\_SB.PCI0.LPCB.EC0.WMBB",
+	"\\_SB.PC00.LPCB.EC0.WMBB",
+}
+
+// ErrACPIRejected reports that the method exists but refused these arguments.
+// It matters because the WMI sample code AMI ships in reference firmware
+// answers every unrecognised selector with 0xFFFFFFFF. Masked to a byte that
+// reads as a plausible 100% duty cycle, so a method carrying the right name and
+// the right GUID can still be pure boilerplate with nothing behind it.
+var ErrACPIRejected = errors.New("ACPI method rejected the request")
+
+// ErrNoACPIMethod reports that no fan method was located.
+var ErrNoACPIMethod = errors.New("no ACPI fan method found")
+
+const acpiCallDev = "/proc/acpi/call"
+
+func acpiCallAt(path string, method, arg int) (int, error) {
+	cmd := fmt.Sprintf("%s 0x00 %#x %#x", path, method, arg)
+	if err := os.WriteFile(acpiCallDev, []byte(cmd), 0); err != nil {
 		return 0, fmt.Errorf("acpi_call write: %w", err)
 	}
-	data, err := os.ReadFile("/proc/acpi/call")
+	data, err := os.ReadFile(acpiCallDev)
 	if err != nil {
 		return 0, fmt.Errorf("acpi_call read: %w", err)
 	}
-	result := strings.TrimRight(strings.TrimSpace(string(data)), "\x00")
-	if !strings.HasPrefix(result, "0x") {
-		return 0, nil
+	return parseACPIReply(path, string(data))
+}
+
+// parseACPIReply turns one /proc/acpi/call reply into a value. acpi_call
+// reports failures inside its output rather than through the read, so every
+// non-numeric reply here used to be read as a successful call returning zero.
+func parseACPIReply(path, raw string) (int, error) {
+	result := strings.TrimRight(strings.TrimSpace(raw), "\x00")
+	if rest, found := strings.CutPrefix(result, "Error:"); found {
+		return 0, fmt.Errorf("%s: %s", path, strings.TrimSpace(rest))
 	}
-	val, err := strconv.ParseInt(strings.TrimPrefix(result, "0x"), 16, 64)
+	hex, found := strings.CutPrefix(result, "0x")
+	if !found {
+		return 0, fmt.Errorf("%s: unexpected reply %q", path, result)
+	}
+	val, err := strconv.ParseInt(hex, 16, 64)
 	if err != nil {
 		return 0, fmt.Errorf("acpi_call parse '%s': %w", result, err)
 	}
+	if val == 0xFFFFFFFF {
+		return 0, fmt.Errorf("%s: %w", path, ErrACPIRejected)
+	}
 	return int(val), nil
+}
+
+// findACPIFanMethod picks the first candidate path that answers a fan-duty read,
+// and reports whether it was actually verified. Probing writes to
+// /proc/acpi/call, which needs root; when the probe cannot run at all we fall
+// back to the upstream path unverified, so that an unprivileged --status says
+// "unverified" rather than claiming the machine has no backend.
+// AVELLCC_ACPI_FAN_METHOD overrides the search.
+func findACPIFanMethod() (string, bool) {
+	if p := os.Getenv("AVELLCC_ACPI_FAN_METHOD"); p != "" {
+		return p, false
+	}
+	blocked := false
+	for _, p := range acpiFanMethods {
+		_, err := acpiCallAt(p, 0x63, 0)
+		if err == nil {
+			return p, true
+		}
+		if errors.Is(err, os.ErrPermission) {
+			blocked = true
+			break
+		}
+	}
+	if blocked {
+		return acpiFanMethods[0], false
+	}
+	return "", false
+}
+
+func (fc *FanController) acpiCall(method, arg int) (int, error) {
+	if fc.acpiMethod == "" {
+		return 0, ErrNoACPIMethod
+	}
+	return acpiCallAt(fc.acpiMethod, method, arg)
 }
 
 func (fc *FanController) acpiGetFans() FanStatus {
 	fans := FanStatus{}
 	for fanNum, cmd := range map[int]int{1: 0x63, 2: 0x64} {
-		raw, err := acpiCall(cmd, 0)
+		raw, err := fc.acpiCall(cmd, 0)
 		if err != nil {
 			continue
 		}
@@ -211,8 +319,8 @@ func (fc *FanController) acpiSetFan(fanID, duty int) error {
 	if fanID == 0 {
 		arg = (duty & 0xFF) | ((duty & 0xFF) << 8)
 	} else {
-		raw1, _ := acpiCall(0x63, 0)
-		raw2, _ := acpiCall(0x64, 0)
+		raw1, _ := fc.acpiCall(0x63, 0)
+		raw2, _ := fc.acpiCall(0x64, 0)
 		duty1 := raw1 & 0xFF
 		duty2 := raw2 & 0xFF
 		if duty1 == 0 {
@@ -229,7 +337,7 @@ func (fc *FanController) acpiSetFan(fanID, duty int) error {
 		}
 		arg = (duty1 & 0xFF) | ((duty2 & 0xFF) << 8)
 	}
-	_, err := acpiCall(0x68, arg)
+	_, err := fc.acpiCall(0x68, arg)
 	return err
 }
 
@@ -290,8 +398,14 @@ func StatusReport(fc *FanController) string {
 			}
 			lines = append(lines, "  "+strings.Join(parts, "  "))
 		}
+		if level, ok := fc.ECFanLevel(); ok {
+			lines = append(lines, fmt.Sprintf("  EC curve step: %d", level))
+		}
 	} else {
 		lines = append(lines, "\nNo fan data available.")
+		if hint := fc.BackendHint(); hint != "" {
+			lines = append(lines, hint)
+		}
 	}
 
 	temps := fc.GetTemperatures()
@@ -320,4 +434,182 @@ func StatusReport(fc *FanController) string {
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+// ACPIFan describes one ACPI fan object (PNP0C0B) as the kernel exposes it
+// through the thermal cooling-device class.
+type ACPIFan struct {
+	Name     string
+	MaxState int
+}
+
+// ACPIFanObjects returns the firmware's ACPI fan objects. A MaxState of 1 means
+// the firmware offers on/off switching only: no tachometer, no duty cycle. Such
+// fans exist on machines that report no fan RPM at all, which is worth saying
+// out loud rather than leaving the absence unexplained.
+func ACPIFanObjects() []ACPIFan {
+	var fans []ACPIFan
+	dirs, _ := filepath.Glob("/sys/class/thermal/cooling_device*")
+	sort.Strings(dirs)
+	for _, dir := range dirs {
+		typeData, err := os.ReadFile(filepath.Join(dir, "type"))
+		if err != nil || strings.TrimSpace(string(typeData)) != "Fan" {
+			continue
+		}
+		maxState := -1
+		if d, err := os.ReadFile(filepath.Join(dir, "max_state")); err == nil {
+			if v, err := strconv.Atoi(strings.TrimSpace(string(d))); err == nil {
+				maxState = v
+			}
+		}
+		fans = append(fans, ACPIFan{Name: filepath.Base(dir), MaxState: maxState})
+	}
+	return fans
+}
+
+// HasUniwillEC reports whether the firmware exposes a Uniwill embedded-controller
+// node, which is what would make the tuxedo_io driver relevant.
+//
+// It deliberately skips UNIW* nodes that declare a compatible ID for something
+// else. Uniwill's registered ACPI vendor prefix appears on any device its
+// firmware engineers named, not only on the EC: on the Avell Storm 470 the sole
+// UNIW* node is UNIW0001, an I2C touchpad with _CID PNP0C50. Treating that as
+// proof of a Uniwill fan interface sends users to install a DKMS driver on the
+// strength of a pointing device.
+func HasUniwillEC() bool {
+	return hasUniwillECIn("/sys/bus/acpi/devices")
+}
+
+func hasUniwillECIn(root string) bool {
+	dirs, _ := filepath.Glob(filepath.Join(root, "UNIW*"))
+	for _, dir := range dirs {
+		cid, _ := os.ReadFile(filepath.Join(dir, "cid"))
+		if strings.Contains(string(cid), "PNP0C50") {
+			continue // HID-over-I2C peripheral, says nothing about the EC
+		}
+		return true
+	}
+	return false
+}
+
+// HasUniwillPlatformDevice reports whether the firmware exposes the ACPI device
+// that the in-tree uniwill_laptop driver binds to. This is the node that
+// actually matters, and it is not the one carrying Uniwill's vendor prefix:
+// the driver binds to INOU0000, while UNIW* on this machine is a touchpad.
+//
+// The driver does not autoload here. Its module aliases are DMI-based and cover
+// TUXEDO and Schenker machines, so a rebadged unit never matches even though the
+// driver works once loaded.
+func HasUniwillPlatformDevice() bool {
+	matches, _ := filepath.Glob("/sys/bus/acpi/devices/INOU*")
+	return len(matches) > 0
+}
+
+// uniwillWMIGUIDs is the GUID block tuxedo-drivers' uniwill_wmi probes for. Its
+// probe checks nothing else, so any firmware carrying these GUIDs satisfies it.
+var uniwillWMIGUIDs = []string{
+	"ABBC0F6D-8EA1-11D1-00A0-C90629100000",
+	"ABBC0F6E-8EA1-11D1-00A0-C90629100000",
+	"ABBC0F6F-8EA1-11D1-00A0-C90629100000",
+	"ABBC0F70-8EA1-11D1-00A0-C90629100000",
+	"ABBC0F71-8EA1-11D1-00A0-C90629100000",
+	"ABBC0F72-8EA1-11D1-00A0-C90629100000",
+}
+
+// hasUniwillWMIGUIDs reports whether the full block is advertised.
+func hasUniwillWMIGUIDs() bool {
+	for _, guid := range uniwillWMIGUIDs {
+		matches, _ := filepath.Glob("/sys/bus/wmi/devices/" + guid + "*")
+		if len(matches) == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// BackendHint explains what would be needed to get further with fan support. It
+// reports what was actually probed, because every shortcut here — guessing the
+// barebone vendor from an ACPI prefix, trusting a WMI GUID — has a false
+// positive that costs someone an afternoon.
+func (fc *FanController) BackendHint() string {
+	switch fc.backend {
+	case BackendNone:
+		lines := []string{"No fan backend detected."}
+
+		if HasUniwillPlatformDevice() {
+			lines = append(lines, "",
+				"This machine has the INOU0000 ACPI device, which the in-tree",
+				"uniwill_laptop driver binds to. It reports fan RPM, PWM and CPU/GPU",
+				"temperatures through hwmon. It does not autoload here — its module",
+				"aliases match on TUXEDO and Schenker DMI strings only:",
+				"  sudo modprobe uniwill_laptop",
+				"  echo uniwill_laptop | sudo tee /etc/modules-load.d/uniwill.conf")
+			return strings.Join(lines, "\n")
+		}
+
+		if _, known := ecRegisterMaps[boardName()]; known && ecIOPath() == "" {
+			lines = append(lines, "",
+				"This model's EC registers are known, but its register space is not",
+				"readable here. It lives in debugfs, so this needs root and the ec_sys",
+				"module:",
+				"  sudo modprobe ec_sys && sudo avellcc fan --status")
+		}
+
+		if fans := ACPIFanObjects(); len(fans) > 0 {
+			onOff := true
+			for _, f := range fans {
+				if f.MaxState > 1 {
+					onOff = false
+				}
+			}
+			if onOff {
+				lines = append(lines, fmt.Sprintf(
+					"The firmware exposes %d ACPI fan object(s), but each is an on/off cooling",
+					len(fans)),
+					"device with no tachometer, so none of them can report RPM.")
+			}
+		}
+
+		if _, err := os.Stat("/proc/acpi/call"); err != nil {
+			lines = append(lines, "",
+				"Clevo barebones reach fan control through an ACPI method, via acpi_call:",
+				"  sudo pacman -S --needed acpi_call && sudo modprobe acpi_call")
+		} else {
+			lines = append(lines, "",
+				"acpi_call is loaded, but none of the known fan methods answered:",
+				"  "+strings.Join(acpiFanMethods, "  "),
+				"Set AVELLCC_ACPI_FAN_METHOD to point at another ACPI path.")
+		}
+
+		switch {
+		case HasUniwillEC():
+			lines = append(lines, "",
+				"This machine exposes a Uniwill EC node. tuxedo-drivers provides",
+				"/dev/tuxedo_io for those:",
+				"  yay -S tuxedo-drivers-nocompatcheck-dkms && sudo modprobe tuxedo_io")
+		case hasUniwillWMIGUIDs():
+			lines = append(lines, "",
+				"Do not install tuxedo-drivers on the strength of the WMI GUIDs alone.",
+				"This machine advertises the whole ABBC0F6x block that uniwill_wmi probes",
+				"for, but no Uniwill EC node backs it: on the Avell Storm 470 that block is",
+				"the WMI sample code AMI ships in its reference firmware. The driver would",
+				"bind on the false positive, and its EC helper reaches a method that feeds",
+				"caller bytes straight into raw EC writes. See docs/storm470-fans.md.")
+		}
+		return strings.Join(lines, "\n")
+
+	case BackendECRAM:
+		return "Readings come straight from the embedded controller. Setting fan speed\n" +
+			"would mean writing to it, which this fork does not do — the same controller\n" +
+			"runs battery charging and thermal shutdown. See docs/storm470-fans.md."
+
+	case BackendACPICall:
+		if !fc.acpiVerified {
+			return fmt.Sprintf("Using ACPI method %s, unverified — probing it needs root.", fc.acpiMethod)
+		}
+	case BackendHwmon:
+		return "hwmon exposes readings only. Setting fan speed needs acpi_call (Clevo) or\n" +
+			"tuxedo_io (Uniwill/TongFang)."
+	}
+	return ""
 }

@@ -27,6 +27,22 @@ var (
 	lbColorID    int
 	lbColorIDSet bool
 
+	// Omarchy theme integration (ITE 8233 only)
+	lbTheme      bool
+	lbThemeKey   string
+	lbShowConfig bool
+
+	// Pulse daemon (ITE 8233 only)
+	pulseEnable        bool
+	pulseFPS           int
+	pulsePlayer        string
+	pulseMinBrightness int
+	pulseMaxBrightness int
+	pulseInputMethod   string
+	pulseInputSource   string
+	pulseDebug         bool
+	pulseGain          float64
+
 	// Debug flags
 	lbDebugDescriptor  bool
 	lbDebugGet         string
@@ -59,6 +75,27 @@ func init() {
 	f.StringVar(&lbEffectCode, "effect-code", "", "Set effect by raw hex code")
 	f.IntVar(&lbColorID, "color-id", 0, "Set color by raw ID")
 
+	// Omarchy theme integration
+	f.BoolVar(&lbTheme, "theme", false, "Take the color from the current Omarchy theme")
+	f.StringVar(&lbThemeKey, "theme-key", "auto",
+		"colors.toml key for --theme, or auto to pick the hue farthest from the accent")
+	f.BoolVar(&lbShowConfig, "show-config", false,
+		"Print the settings in force and where each came from")
+
+	// Pulse daemon
+	f.BoolVar(&pulseEnable, "pulse", false,
+		"Run in the foreground, pulsing the bar in time with the music (needs cava)")
+	f.IntVar(&pulseFPS, "pulse-fps", 30, "Pulse frame rate in Hz")
+	f.StringVar(&pulsePlayer, "pulse-player", defaultPulsePlayer, "MPRIS bus name to follow")
+	f.IntVar(&pulseMinBrightness, "pulse-min-brightness", 12, "Pulse brightness floor (0-100)")
+	f.IntVar(&pulseMaxBrightness, "pulse-max-brightness", 100, "Pulse brightness ceiling (0-100)")
+	f.StringVar(&pulseInputMethod, "pulse-input-method", "pipewire", "cava input method")
+	f.StringVar(&pulseInputSource, "pulse-input-source", "auto", "cava input source")
+	f.Float64Var(&pulseGain, "pulse-gain", 1.25,
+		"Rescale loudness before brightness; corrects for cava normalising the loudest bar")
+	f.BoolVar(&pulseDebug, "pulse-debug", false,
+		"Print band energies and what is written to the bar, once a second")
+
 	// Debug group
 	f.BoolVar(&lbDebugDescriptor, "debug-descriptor", false, "Dump the HID report descriptor")
 	f.StringVar(&lbDebugGet, "debug-get", "", "Read a HID feature report (e.g. 0x5A)")
@@ -81,6 +118,20 @@ func sortedKeys[V any](m map[string]V) []string {
 }
 
 func runLightbar(cmd *cobra.Command, args []string) error {
+	// Uniwill/TongFang barebones carry a chassis bar on a second ITE MCU that
+	// speaks a different protocol from the Clevo rear lightbar below.
+	if path, product, err := lightbar.FindITE8233(); err == nil {
+		return runLightbar8233(cmd, path, product)
+	}
+
+	// These belong to the ITE 8233 path. Falling through with them set used to
+	// print status, or launch the interactive panel, which looks like the flag
+	// was accepted and did nothing.
+	if lbTheme || lbShowConfig || pulseEnable {
+		return fmt.Errorf("--theme, --show-config and --pulse need an ITE 8233 chassis " +
+			"light bar; this machine has an ITE 8911 rear lightbar")
+	}
+
 	lbBrightSet = cmd.Flags().Changed("brightness")
 	lbSpeedSet = cmd.Flags().Changed("speed")
 	lbColorIDSet = cmd.Flags().Changed("color-id")

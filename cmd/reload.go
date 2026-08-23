@@ -35,8 +35,10 @@ func runReload(cmd *cobra.Command, args []string) error {
 
 	// Keyboard
 	if kbState, ok := bundle["keyboard"].(map[string]any); ok && len(kbState) > 0 {
-		ctrl := keyboard.NewITE8295(nil)
-		if err := ctrl.Open(); err != nil {
+		ctrl, err := keyboard.NewController()
+		if err != nil {
+			fmt.Printf("Keyboard: %v, skipping.\n", err)
+		} else if err := ctrl.Open(); err != nil {
 			fmt.Printf("Keyboard: %v, skipping.\n", err)
 		} else {
 			reloadKeyboardState(ctrl, kbState)
@@ -63,7 +65,7 @@ func runReload(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func reloadKeyboardState(ctrl *keyboard.ITE8295, kbState map[string]any) {
+func reloadKeyboardState(ctrl keyboard.Controller, kbState map[string]any) {
 	mode, _ := kbState["mode"].(string)
 	switch mode {
 	case "off":
@@ -75,18 +77,19 @@ func reloadKeyboardState(ctrl *keyboard.ITE8295, kbState map[string]any) {
 			if s, ok := config.GetInt(kbState, "speed"); ok {
 				speed = s
 			}
-			if animID, ok := keyboard.EffectNames[strings.ToLower(effect)]; ok {
-				_ = ctrl.SetHWAnimation(animID)
+			if animID, ok := ctrl.HWEffects()[strings.ToLower(effect)]; ok {
+				_ = ctrl.SetHWAnimation(animID, speed)
 			} else {
 				swName := strings.ToLower(effect)
 				if !strings.HasPrefix(swName, "sw_") {
 					swName = "sw_" + swName
 				}
-				if fn, ok := keyboard.SoftwareEffects[swName]; ok {
-					runner := keyboard.NewEffectRunner(ctrl, 30)
-					opts := keyboard.DefaultEffectOpts()
-					opts.Speed = speed
-					runner.Start(fn, opts)
+				if _, ok := keyboard.SoftwareEffects[swName]; ok {
+					// Software effects render from a live process, so a one-shot
+					// reload cannot restore one. Say so rather than starting a
+					// runner that dies the moment this command returns.
+					fmt.Printf("Keyboard: software effect %q needs a running process; "+
+						"start it with 'avellcc keyboard --effect %s'.\n", effect, effect)
 				}
 			}
 		}
@@ -100,7 +103,12 @@ func reloadKeyboardState(ctrl *keyboard.ITE8295, kbState map[string]any) {
 	case "profile":
 		profilePath, _ := kbState["profile"].(string)
 		if profilePath != "" {
-			_, _ = loadProfile(ctrl, profilePath)
+			_, runner, _ := loadProfile(ctrl, profilePath)
+			if runner != nil {
+				runner.Stop()
+				fmt.Printf("Keyboard: profile %q contains a software effect, which "+
+					"reload cannot keep running.\n", profilePath)
+			}
 		}
 	}
 
@@ -109,7 +117,7 @@ func reloadKeyboardState(ctrl *keyboard.ITE8295, kbState map[string]any) {
 	}
 
 	if perKey, ok := kbState["per_key"].(map[string]any); ok {
-		keymap := keyboard.LoadKeymap()
+		keymap := keyboard.LoadKeymapFor(ctrl)
 		for keyName, colorVal := range perKey {
 			if colorArr, ok := colorVal.([]any); ok && len(colorArr) == 3 {
 				pos, found := keyboard.GetKeyPosition(keyName, keymap)
@@ -127,6 +135,12 @@ func reloadKeyboardState(ctrl *keyboard.ITE8295, kbState map[string]any) {
 func restoreLightbarState(lbState map[string]any, ctrl *lightbar.ITE8911) error {
 	if lbState == nil {
 		return nil
+	}
+
+	// State written by the ITE 8233 chassis bar is RGB and carries its own
+	// marker; it must not be read through the X58 palette below.
+	if controller, _ := config.GetString(lbState, "controller"); controller == lb8233StateKey {
+		return restoreLightbar8233State(lbState)
 	}
 
 	state := config.MergeLightbarState(lbState, nil)

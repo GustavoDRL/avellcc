@@ -111,8 +111,9 @@ func (c *ITE8295) SetKeyMap(colorMap map[[2]int][3]byte) error {
 	return nil
 }
 
-// SetHWAnimation triggers a hardware-driven animation effect.
-func (c *ITE8295) SetHWAnimation(animID int) error {
+// SetHWAnimation triggers a hardware-driven animation effect. This controller's
+// animation command carries no speed field, so speed is ignored.
+func (c *ITE8295) SetHWAnimation(animID, _ int) error {
 	return c.send(CmdSetEffect, animID, 0, 0, 0)
 }
 
@@ -125,3 +126,21 @@ func (c *ITE8295) Off() error {
 func (c *ITE8295) GetFirmwareInfo() ([]byte, error) {
 	return c.dev.GetFeatureReport(0x5A, 17)
 }
+
+// Name identifies the controller in user-facing output.
+func (c *ITE8295) Name() string { return "ITE 8295" }
+
+// Rows returns the LED grid height.
+func (c *ITE8295) Rows() int { return GridRows }
+
+// Cols returns the LED grid width.
+func (c *ITE8295) Cols() int { return GridCols }
+
+// HWEffects returns the controller's built-in animations.
+func (c *ITE8295) HWEffects() map[string]int { return EffectNames }
+
+// KeymapID names this controller's calibrated keymap file.
+func (c *ITE8295) KeymapID() string { return KeymapIDITE8295 }
+
+// DefaultKeymap returns the built-in 6x20 key map.
+func (c *ITE8295) DefaultKeymap() map[string][2]int { return DefaultMap8295 }

@@ -1,0 +1,14 @@
+[Unit]
+Description=Restore Avell keyboard LEDs at login and after resume
+Documentation=https://github.com/hugo-andrade/avellcc
+After=dbus.socket
+Requires=dbus.socket
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/avellcc-resume-monitor
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

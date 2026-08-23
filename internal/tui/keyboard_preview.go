@@ -13,8 +13,8 @@ import (
 // KeyboardModel displays a visual keyboard layout with colors.
 type KeyboardModel struct {
 	keymap map[string][2]int
-	grid   [keyboard.GridRows][keyboard.GridCols]string // key name at each position
-	colors map[string][3]byte                           // key name -> RGB
+	grid   [keyboard.MaxGridRows][keyboard.MaxGridCols]string // key name at each position
+	colors map[string][3]byte                                 // key name -> RGB
 	width  int
 	height int
 }
@@ -26,7 +26,7 @@ func NewKeyboardModel(keymap map[string][2]int, colors map[string][3]byte) Keybo
 	}
 	// Build reverse grid
 	for name, pos := range keymap {
-		if pos[0] >= 0 && pos[0] < keyboard.GridRows && pos[1] >= 0 && pos[1] < keyboard.GridCols {
+		if pos[0] >= 0 && pos[0] < keyboard.MaxGridRows && pos[1] >= 0 && pos[1] < keyboard.MaxGridCols {
 			m.grid[pos[0]][pos[1]] = name
 		}
 	}
@@ -58,9 +58,9 @@ func (m KeyboardModel) View() tea.View {
 
 	cellWidth := 6
 
-	for row := 0; row < keyboard.GridRows; row++ {
+	for row := 0; row < keyboard.MaxGridRows; row++ {
 		var cells []string
-		for col := 0; col < keyboard.GridCols; col++ {
+		for col := 0; col < keyboard.MaxGridCols; col++ {
 			name := m.grid[row][col]
 			if name == "" {
 				cells = append(cells, strings.Repeat(" ", cellWidth))
@@ -99,4 +99,34 @@ func (m KeyboardModel) View() tea.View {
 	sb.WriteString("\n")
 
 	return tea.NewView(sb.String())
+}
+
+// RenderLayoutText draws the calibrated grid as plain text, for when there is
+// no terminal to run the interactive preview in (a pipe, a log, a script).
+func RenderLayoutText(keymap map[string][2]int, rows, cols int) string {
+	var grid [keyboard.MaxGridRows][keyboard.MaxGridCols]string
+	for name, pos := range keymap {
+		if pos[0] >= 0 && pos[0] < rows && pos[1] >= 0 && pos[1] < cols {
+			grid[pos[0]][pos[1]] = name
+		}
+	}
+
+	const cellWidth = 6
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Keyboard layout (%d rows x %d cols, %d keys mapped)\n\n", rows, cols, len(keymap))
+	for row := 0; row < rows; row++ {
+		fmt.Fprintf(&sb, "%2d ", row)
+		for col := 0; col < cols; col++ {
+			name := grid[row][col]
+			if name == "" {
+				name = "·"
+			}
+			if len(name) > cellWidth-1 {
+				name = name[:cellWidth-1]
+			}
+			fmt.Fprintf(&sb, "%-*s", cellWidth, name)
+		}
+		sb.WriteString("\n")
+	}
+	return sb.String()
 }

@@ -1,0 +1,40 @@
+#!/bin/bash
+#
+# Paint the chassis light bar with the current Omarchy theme's colour.
+#
+# Runs from ~/.config/omarchy/hooks/theme-set.d/ after every `omarchy theme set`,
+# right after 50-avellcc-keyboard. Deliberately a separate file: the two
+# controllers are different hardware, either can be absent, and neither should
+# be able to break the other's theme switch.
+#
+# There is nothing to configure here. Which colour, how bright, which effect,
+# and whether to do this at all are all in ~/.config/avellcc/lightbar.toml,
+# the same file the pulse daemon reads:
+#
+#   avellcc lightbar --show-config
+#
+# This used to carry an awk colour picker and five AVELLCC_THEME_LIGHTBAR_*
+# environment variables. Both are gone: the rule lives in Go so the daemon can
+# share it, and the settings live in one file so there is one place to look.
+#
+# Every exit path is a success. A theme switch must never fail because the
+# light bar is missing, busy, disabled, or on a machine that has none.
+
+set -uo pipefail
+
+# Absolute, like avellcc-resume-monitor and the bar widget. A hook runs in
+# whatever environment omarchy-theme-set was invoked from, and a command
+# missing from that PATH would make this a silent no-op forever.
+AVELLCC="${AVELLCC_BIN:-$HOME/.local/bin/avellcc}"
+[[ -x $AVELLCC ]] || exit 0
+
+# The pulse daemon, if it is running, overwrites this within a frame while
+# music plays — and then restores exactly this, because it restores from the
+# state file this write updates. Writing it unconditionally is what makes the
+# theme the bar's resting appearance.
+# A wedged HIDIOCSFEATURE blocks for the usbhid control-transfer timeout, which
+# is bounded but not by anything this hook controls. A theme switch should never
+# wait on the light bar.
+timeout 5 "$AVELLCC" lightbar --theme >/dev/null 2>&1
+
+exit 0

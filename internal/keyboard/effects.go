@@ -8,7 +8,7 @@ import (
 )
 
 // EffectFunc is a per-frame effect function. frame counts from 0.
-type EffectFunc func(ctrl *ITE8295, frame int, opts EffectOpts)
+type EffectFunc func(ctrl Controller, frame int, opts EffectOpts)
 
 // EffectOpts holds parameters for software effects.
 type EffectOpts struct {
@@ -23,14 +23,14 @@ func DefaultEffectOpts() EffectOpts {
 
 // EffectRunner manages a software LED effect running in a goroutine.
 type EffectRunner struct {
-	ctrl   *ITE8295
+	ctrl   Controller
 	fps    int
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
 
 // NewEffectRunner creates a new runner for the given controller.
-func NewEffectRunner(ctrl *ITE8295, fps int) *EffectRunner {
+func NewEffectRunner(ctrl Controller, fps int) *EffectRunner {
 	if fps <= 0 {
 		fps = 30
 	}
@@ -103,18 +103,23 @@ func hsvToRGB(h, s, v float64) (byte, byte, byte) {
 }
 
 // RainbowWave is a rainbow wave effect — hue shifts across columns.
-func RainbowWave(ctrl *ITE8295, frame int, opts EffectOpts) {
-	for row := 0; row < GridRows; row++ {
-		for col := 0; col < GridCols; col++ {
-			hue := float64(col)/float64(GridCols) + float64(frame)*float64(opts.Speed)*0.005
+func RainbowWave(ctrl Controller, frame int, opts EffectOpts) {
+	rows, cols := ctrl.Rows(), ctrl.Cols()
+	colorMap := make(map[[2]int][3]byte, rows*cols)
+	for row := 0; row < rows; row++ {
+		for col := 0; col < cols; col++ {
+			hue := float64(col)/float64(cols) + float64(frame)*float64(opts.Speed)*0.005
 			r, g, b := hsvToRGB(hue, 1.0, 1.0)
-			_ = ctrl.SetKeyColor(row, col, r, g, b)
+			colorMap[[2]int{row, col}] = [3]byte{r, g, b}
 		}
 	}
+	// One batched update per frame: controllers that push whole rows would
+	// otherwise need a separate transfer for every key.
+	_ = ctrl.SetKeyMap(colorMap)
 }
 
 // Breathing is a pulsing brightness effect.
-func Breathing(ctrl *ITE8295, frame int, opts EffectOpts) {
+func Breathing(ctrl Controller, frame int, opts EffectOpts) {
 	t := float64(frame) * float64(opts.Speed) * 0.02
 	factor := (math.Sin(t) + 1.0) / 2.0
 	cr := byte(float64(opts.R) * factor)
@@ -124,17 +129,21 @@ func Breathing(ctrl *ITE8295, frame int, opts EffectOpts) {
 }
 
 // ColorWave is a brightness wave that moves across columns.
-func ColorWave(ctrl *ITE8295, frame int, opts EffectOpts) {
-	for row := 0; row < GridRows; row++ {
-		for col := 0; col < GridCols; col++ {
-			t := float64(frame) * float64(opts.Speed) * 0.03
+func ColorWave(ctrl Controller, frame int, opts EffectOpts) {
+	rows, cols := ctrl.Rows(), ctrl.Cols()
+	colorMap := make(map[[2]int][3]byte, rows*cols)
+	t := float64(frame) * float64(opts.Speed) * 0.03
+	for row := 0; row < rows; row++ {
+		for col := 0; col < cols; col++ {
 			factor := (math.Sin(t-float64(col)*0.5) + 1.0) / 2.0
-			r := byte(float64(opts.R) * factor)
-			g := byte(float64(opts.G) * factor)
-			b := byte(float64(opts.B) * factor)
-			_ = ctrl.SetKeyColor(row, col, r, g, b)
+			colorMap[[2]int{row, col}] = [3]byte{
+				byte(float64(opts.R) * factor),
+				byte(float64(opts.G) * factor),
+				byte(float64(opts.B) * factor),
+			}
 		}
 	}
+	_ = ctrl.SetKeyMap(colorMap)
 }
 
 // SoftwareEffects maps effect names to their functions.

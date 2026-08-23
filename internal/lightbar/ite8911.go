@@ -110,7 +110,8 @@ func (c *ITE8911) Open() error {
 	if c.dev == nil {
 		path, err := hidraw.FindHidraw(VID, PID)
 		if err != nil {
-			return fmt.Errorf("ITE lightbar device (%04x:%04x) not found: %w", VID, PID, err)
+			return fmt.Errorf("no ITE lightbar (%04x:%04x) on this machine; only some "+
+				"Clevo barebones ship the rear lightbar: %w", VID, PID, err)
 		}
 		c.dev = &hidraw.HidrawDevice{Path: path}
 		c.ownsDev = true

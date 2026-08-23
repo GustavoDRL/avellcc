@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -35,12 +36,46 @@ type effectOption struct {
 	isSW    bool
 }
 
-var kbEffects = []effectOption{
-	{"none", "None", false},
-	{"rainbow", "Rainbow", false},
-	{"sw_rainbow", "Rainbow Wave", true},
-	{"sw_breathing", "Breathing", true},
-	{"sw_wave", "Color Wave", true},
+// buildEffectOptions lists what this controller actually supports: its own
+// hardware animations, which differ between the ITE 8295 and ITE 8291, plus the
+// software effects, which work on any controller.
+func buildEffectOptions(ctrl keyboard.Controller) []effectOption {
+	opts := []effectOption{{"none", "None", false}}
+
+	hw := ctrl.HWEffects()
+	names := make([]string, 0, len(hw))
+	for name := range hw {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		opts = append(opts, effectOption{name, effectDisplayName(name), false})
+	}
+
+	swNames := make([]string, 0, len(keyboard.SoftwareEffects))
+	for name := range keyboard.SoftwareEffects {
+		swNames = append(swNames, name)
+	}
+	sort.Strings(swNames)
+	for _, name := range swNames {
+		opts = append(opts, effectOption{name, effectDisplayName(name), true})
+	}
+	return opts
+}
+
+// effectDisplayName turns an effect id into a label, marking the software ones
+// so they are distinguishable from a hardware animation of the same name.
+func effectDisplayName(name string) string {
+	software := strings.HasPrefix(name, "sw_")
+	n := strings.ReplaceAll(strings.TrimPrefix(name, "sw_"), "_", " ")
+	if n == "" {
+		return name
+	}
+	label := strings.ToUpper(n[:1]) + n[1:]
+	if software {
+		label += " (software)"
+	}
+	return label
 }
 
 const (
@@ -50,7 +85,8 @@ const (
 
 // KeyboardPanel is the interactive keyboard control TUI.
 type KeyboardPanel struct {
-	kb *keyboard.ITE8295
+	kb      keyboard.Controller
+	effects []effectOption
 
 	// Current hardware state
 	brightness int
@@ -70,7 +106,8 @@ type KeyboardPanel struct {
 }
 
 // NewKeyboardPanel creates the interactive keyboard panel.
-func NewKeyboardPanel(kb *keyboard.ITE8295) *KeyboardPanel {
+func NewKeyboardPanel(kb keyboard.Controller) *KeyboardPanel {
+	effects := buildEffectOptions(kb)
 	brightness := 7
 	colorIdx := 0
 
@@ -83,6 +120,7 @@ func NewKeyboardPanel(kb *keyboard.ITE8295) *KeyboardPanel {
 
 	return &KeyboardPanel{
 		kb:         kb,
+		effects:    effects,
 		brightness: brightness,
 		colorIdx:   colorIdx,
 		effectIdx:  0,
@@ -201,7 +239,7 @@ func (m *KeyboardPanel) sectionLen() int {
 	if m.section == sectionColor {
 		return len(kbColors)
 	}
-	return len(kbEffects)
+	return len(m.effects)
 }
 
 func (m *KeyboardPanel) applySelection() {
@@ -221,7 +259,7 @@ func (m *KeyboardPanel) applySelection() {
 		m.applied = fmt.Sprintf("Color: %s", c.name)
 		m.saveState()
 	} else {
-		eff := kbEffects[m.cursor]
+		eff := m.effects[m.cursor]
 		// Stop any running effect
 		if m.runner != nil {
 			m.runner.Stop()
@@ -255,8 +293,8 @@ func (m *KeyboardPanel) applySelection() {
 			m.applied = fmt.Sprintf("Effect: %s", eff.display)
 		default:
 			// Hardware effect
-			if animID, ok := keyboard.EffectNames[eff.name]; ok {
-				if err := m.kb.SetHWAnimation(animID); err != nil {
+			if animID, ok := m.kb.HWEffects()[eff.name]; ok {
+				if err := m.kb.SetHWAnimation(animID, 5); err != nil {
 					m.err = err
 					return
 				}
@@ -274,7 +312,7 @@ func (m *KeyboardPanel) saveState() {
 		"brightness": float64(m.brightness),
 	}
 
-	eff := kbEffects[m.effectIdx]
+	eff := m.effects[m.effectIdx]
 	if eff.name != "none" {
 		state["mode"] = "effect"
 		state["effect"] = eff.name
@@ -296,7 +334,7 @@ func (m *KeyboardPanel) View() tea.View {
 
 	var sb strings.Builder
 
-	RenderHeader(&sb, "keyboard", "ITE 8295", m.width)
+	RenderHeader(&sb, "keyboard", m.kb.Name(), m.width)
 
 	// Brightness bar
 	brightnessLabel := lipgloss.NewStyle().Foreground(ColorMuted).Render("  Brightness")
@@ -339,7 +377,7 @@ func (m *KeyboardPanel) View() tea.View {
 	// Effect section
 	RenderSection(&sb, "Effect", m.section == sectionEffect, m.width, func(sb *strings.Builder) {
 		var items []string
-		for i, eff := range kbEffects {
+		for i, eff := range m.effects {
 			style := lipgloss.NewStyle()
 
 			isActive := i == m.effectIdx

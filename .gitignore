@@ -1,3 +1,4 @@
 /avellcc
 build/
 coverage.txt
+.codegraph/

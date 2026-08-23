@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "id": "disney.lightbar",
+  "name": "Light bar",
+  "version": "1.0.0",
+  "author": "disney",
+  "description": "Chassis light bar: theme colour at rest, pulsing with the music, and everything in lightbar.toml",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Light bar",
+    "description": "Control the ITE 8233 chassis light bar: pulse, theme colour, brightness and effects.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 3
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval while open (seconds)",
+        "min": 1,
+        "max": 60,
+        "step": 1,
+        "defaultValue": 3
+      }
+    ]
+  }
+}
