@@ -151,10 +151,15 @@ func FindITE8233() (string, uint16, error) {
 		VID8233, PIDs8233[0], PIDs8233[1], PIDs8233[2])
 }
 
+// findITE8233 is the discovery hook. It is a variable only so a test can drive
+// the failed-reopen path — the one that used to leave a nil device behind —
+// without a lightbar attached. Production always calls FindITE8233.
+var findITE8233 = FindITE8233
+
 // Open opens the hidraw device, auto-discovering it if needed.
 func (c *ITE8233) Open() error {
 	if c.dev == nil {
-		path, pid, err := FindITE8233()
+		path, pid, err := findITE8233()
 		if err != nil {
 			return err
 		}
@@ -174,12 +179,24 @@ func (c *ITE8233) Open() error {
 // old descriptor valid as a file and dead as a device: every ioctl fails with
 // ENODEV. A daemon that opens the device once at start has no way back from
 // that on its own, so it has to be able to ask for a fresh one.
+//
+// Discovery runs before the device is replaced. Clearing c.dev first meant that
+// the case Reopen exists for — the device has not come back yet — left dev nil
+// for good, and the next write in the pulse loop panicked on a nil pointer
+// instead of returning the error the backoff was written to handle. The old
+// descriptor is closed either way, so a send after a failed Reopen fails
+// cleanly rather than writing to a stale fd.
 func (c *ITE8233) Reopen() error {
 	if c.dev != nil {
 		_ = c.dev.Close()
 	}
-	c.dev = nil
+	path, pid, err := findITE8233()
+	if err != nil {
+		return err
+	}
+	c.dev = &hidraw.HidrawDevice{Path: path}
 	c.ownsDev = true
+	c.product = pid
 	return c.Open()
 }
 
@@ -192,7 +209,15 @@ func (c *ITE8233) Close() error {
 }
 
 // send writes one 8-byte control packet as a feature report.
+//
+// The nil check is what keeps a daemon alive: a controller that was never
+// opened, or whose Reopen found no device, has no descriptor, and the pulse
+// loop calls SetColor on every frame. An error is something the backoff can
+// handle; a nil dereference takes the whole unit down.
 func (c *ITE8233) send(payload [8]byte) error {
+	if c.dev == nil {
+		return fmt.Errorf("ITE 8233 lightbar is not open")
+	}
 	buf := make([]byte, ctrlLen8233)
 	copy(buf[1:], payload[:])
 	return c.dev.SendFeatureReport(buf)

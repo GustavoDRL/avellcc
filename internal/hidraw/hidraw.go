@@ -99,7 +99,16 @@ func (d *HidrawDevice) Close() error {
 }
 
 // SendFeatureReport sends a SET_FEATURE report. buf[0] must be the report ID.
+//
+// A closed device is refused by name instead of by errno. Without the guard the
+// ioctl went out on whatever d.fd still held — 0 on a device that was never
+// opened, which is stdin — and the caller got an ENOTTY it could not read as
+// "the controller is not open". Every controller in this repo shares these
+// three entry points, so the check belongs here rather than in each of them.
 func (d *HidrawDevice) SendFeatureReport(buf []byte) error {
+	if !d.open {
+		return fmt.Errorf("hidraw device %s is not open", d.Path)
+	}
 	_, _, errno := unix.Syscall(
 		unix.SYS_IOCTL,
 		uintptr(d.fd),
@@ -114,6 +123,9 @@ func (d *HidrawDevice) SendFeatureReport(buf []byte) error {
 
 // GetFeatureReport reads a GET_FEATURE report. reportID is placed in buf[0].
 func (d *HidrawDevice) GetFeatureReport(reportID byte, length int) ([]byte, error) {
+	if !d.open {
+		return nil, fmt.Errorf("hidraw device %s is not open", d.Path)
+	}
 	buf := make([]byte, length)
 	buf[0] = reportID
 	_, _, errno := unix.Syscall(
@@ -181,6 +193,9 @@ func ReportDescriptor(devPath string) ([]byte, error) {
 // the report ID — 0 when the device does not use numbered reports, in which
 // case the kernel strips it and puts the remaining bytes on the wire.
 func (d *HidrawDevice) Write(buf []byte) error {
+	if !d.open {
+		return fmt.Errorf("hidraw device %s is not open", d.Path)
+	}
 	n, err := unix.Write(d.fd, buf)
 	if err != nil {
 		return fmt.Errorf("write %s: %w", d.Path, err)

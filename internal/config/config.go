@@ -9,6 +9,9 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/hugo-andrade/avellcc/internal/lightbar"
 )
@@ -213,6 +216,17 @@ func LoadState() (map[string]any, error) {
 }
 
 // SaveState saves state to the config file.
+//
+// The write is atomic for the same reason the settings writer is (see
+// atomicWriteFile in lightbar_settings_set.go): os.WriteFile truncates before
+// it writes, and every reader of this file turns an unreadable one into an
+// empty bundle — which the lightbar path then resolves to white at full
+// brightness, and which makes `avellcc reload` say "No saved state found".
+// A rename means a reader sees either the whole old file or the whole new one,
+// and a crash in the middle cannot leave the file truncated for good.
+//
+// The temp file atomicWriteFile creates is named after the settings file; that
+// is cosmetic, it is renamed into place and never read by name.
 func SaveState(state map[string]any) error {
 	dir := ConfigDir()
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -222,13 +236,87 @@ func SaveState(state map[string]any) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(StateFile(), data, 0644)
+	return atomicWriteFile(StateFile(), data)
 }
 
+// lockState takes an exclusive advisory lock covering one load-modify-save of
+// the state file. It is the sibling of lockSettings and exists for the reason
+// an atomic write does not cover: the rename guarantees no reader sees half a
+// file, but it does nothing about two writers that both load the same bundle
+// and each save only its own half of the change. This file has four writers
+// with no coordination between them — the theme hook, the now-playing hook,
+// `avellcc reload` and the TUI.
+//
+// The lock lives in a sibling file because the state file itself is replaced by
+// rename, which would leave two writers holding locks on different inodes.
+// Readers do not lock and do not need to.
+//
+// It is not reentrant: flock on a second descriptor blocks the same process, so
+// nothing called from inside UpdateStateBundle may take it again.
+func lockState() (func(), error) {
+	dir := ConfigDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "state.json.lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("locking the state file: %w", err)
+	}
+	return func() {
+		_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
+		_ = f.Close()
+	}, nil
+}
+
+// UpdateStateBundle runs one load-modify-save of the state file under the state
+// lock. Anything that changes only part of the state has to go through here:
+// `keyboard --color` keeps the saved brightness by loading it first, and an
+// unlocked load-modify-save races the hooks that write the other half, so one
+// of the two changes is silently dropped.
+//
+// mutate must not call SaveState, SaveStateBundle, SaveLightbarState or
+// UpdateStateBundle again — the lock is held and flock deadlocks against
+// itself.
+func UpdateStateBundle(mutate func(bundle map[string]any) error) error {
+	unlock, err := lockState()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	bundle := LoadStateBundle()
+	if err := mutate(bundle); err != nil {
+		return err
+	}
+	return SaveStateBundle(bundle)
+}
+
+// stateReadWarning keeps the warning below to one line per process: the pulse
+// daemon reloads the state on every pause and would otherwise fill the journal.
+var stateReadWarning sync.Once
+
 // LoadStateBundle loads the state bundle with backward compatibility.
+//
+// A missing file and an unreadable one are not the same thing: the first is a
+// first run, the second is state that was lost. The signature stays a plain map
+// because every caller treats "no state" as "leave it alone", so the difference
+// shows up as one warning on stderr — without it a corrupt state.json is
+// indistinguishable from a fresh install and the keyboard comes back at the
+// defaults with nothing to explain why.
 func LoadStateBundle() map[string]any {
 	raw, err := LoadState()
-	if err != nil || raw == nil {
+	if err != nil {
+		stateReadWarning.Do(func() {
+			fmt.Fprintf(os.Stderr, "avellcc: %s could not be read (%v); continuing with no saved state\n",
+				StateFile(), err)
+		})
+		return map[string]any{}
+	}
+	if raw == nil {
 		return map[string]any{}
 	}
 	if _, ok := raw["keyboard"]; ok {
@@ -324,15 +412,18 @@ func GetString(m map[string]any, key string) (string, bool) {
 	return s, ok
 }
 
-// SaveLightbarState saves only the lightbar portion.
+// SaveLightbarState saves only the lightbar portion. It is a load-modify-save
+// — it keeps the keyboard half — so it runs under the state lock, or a theme
+// hook writing the bar and a keyboard command writing the keys drop each other.
 func SaveLightbarState(lightbarState map[string]any) error {
-	bundle := LoadStateBundle()
-	if lightbarState != nil {
-		bundle["lightbar"] = lightbarState
-	} else {
-		delete(bundle, "lightbar")
-	}
-	return SaveStateBundle(bundle)
+	return UpdateStateBundle(func(bundle map[string]any) error {
+		if lightbarState != nil {
+			bundle["lightbar"] = lightbarState
+		} else {
+			delete(bundle, "lightbar")
+		}
+		return nil
+	})
 }
 
 // LoadProfile loads a profile JSON file and applies it.

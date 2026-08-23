@@ -138,16 +138,22 @@ func runKeyboard(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	bundle := config.LoadStateBundle()
-	state := map[string]any{}
+	// Every keyboard command updates the saved state, it does not replace it:
+	// `--color` used to wipe the brightness the panel had just written, and each
+	// `--key` used to wipe the keys set before it. What each command does
+	// invalidate is spelled out in the state* helpers below, one case each.
+	//
+	// The changes are collected here and applied in a single locked
+	// load-modify-save, so the copy they edit is the one that is about to be
+	// written — not one read before a device write that took milliseconds.
+	var stateUpdates []func(map[string]any)
+	var lightbarState map[string]any
 
 	if kbOff {
 		if err := ctrl.Off(); err != nil {
 			return err
 		}
-		state["mode"] = actionOff
-		bundle["keyboard"] = state
-		_ = config.SaveStateBundle(bundle)
+		_ = saveKeyboardState([]func(map[string]any){stateOff()}, nil)
 		fmt.Println("Keyboard LEDs off.")
 		return nil
 	}
@@ -162,7 +168,7 @@ func runKeyboard(cmd *cobra.Command, args []string) error {
 		if err := ctrl.SetBrightness(kbBrightness); err != nil {
 			return err
 		}
-		state["brightness"] = float64(kbBrightness)
+		stateUpdates = append(stateUpdates, stateSetBrightness(kbBrightness))
 		fmt.Printf("Brightness set to %d.\n", kbBrightness)
 	}
 
@@ -173,9 +179,7 @@ func runKeyboard(cmd *cobra.Command, args []string) error {
 			if err := ctrl.SetHWAnimation(animID, speed); err != nil {
 				return err
 			}
-			state["mode"] = actionEffect
-			state[actionEffect] = kbEffect
-			state["speed"] = float64(speed)
+			stateUpdates = append(stateUpdates, stateSetEffect(kbEffect, speed))
 			fmt.Printf("Hardware effect '%s' activated.\n", kbEffect)
 		} else {
 			swName := strings.ToLower(kbEffect)
@@ -193,11 +197,8 @@ func runKeyboard(cmd *cobra.Command, args []string) error {
 			opts := keyboard.DefaultEffectOpts()
 			opts.Speed = speed
 			runner.Start(fn, opts)
-			state["mode"] = actionEffect
-			state[actionEffect] = kbEffect
-			state["speed"] = float64(speed)
-			bundle["keyboard"] = state
-			_ = config.SaveStateBundle(bundle)
+			stateUpdates = append(stateUpdates, stateSetEffect(kbEffect, speed))
+			_ = saveKeyboardState(stateUpdates, nil)
 			fmt.Printf("Software effect '%s' running (speed=%d). Press Ctrl+C to stop.\n", kbEffect, speed)
 			waitForEffect(runner)
 			return nil
@@ -220,19 +221,13 @@ func runKeyboard(cmd *cobra.Command, args []string) error {
 			if err := ctrl.SetKeyColor(pos[0], pos[1], r, g, b); err != nil {
 				return err
 			}
-			perKey, _ := state["per_key"].(map[string]any)
-			if perKey == nil {
-				perKey = map[string]any{}
-			}
-			perKey[strings.ToLower(kbKey)] = []any{float64(r), float64(g), float64(b)}
-			state["per_key"] = perKey
+			stateUpdates = append(stateUpdates, stateSetKeyColor(kbKey, r, g, b))
 			fmt.Printf("Key '%s' set to (%d, %d, %d).\n", kbKey, r, g, b)
 		} else {
 			if err := ctrl.SetAllKeys(r, g, b); err != nil {
 				return err
 			}
-			state["mode"] = "static"
-			state["color"] = []any{float64(r), float64(g), float64(b)}
+			stateUpdates = append(stateUpdates, stateSetColorAll(r, g, b))
 			fmt.Printf("All keys set to (%d, %d, %d).\n", r, g, b)
 		}
 	case kbProfile != "":
@@ -241,11 +236,8 @@ func runKeyboard(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		profileRunner = runner
-		state["mode"] = "profile"
-		state["profile"] = kbProfile
-		if lbState != nil {
-			bundle["lightbar"] = lbState
-		}
+		stateUpdates = append(stateUpdates, stateSetProfile(kbProfile, kbBrightSet))
+		lightbarState = lbState
 		fmt.Printf("Profile '%s' loaded.\n", kbProfile)
 	}
 
@@ -253,14 +245,11 @@ func runKeyboard(cmd *cobra.Command, args []string) error {
 		if err := ctrl.SetBrightness(kbBrightness); err != nil {
 			return err
 		}
-		state["brightness"] = float64(kbBrightness)
+		stateUpdates = append(stateUpdates, stateSetBrightness(kbBrightness))
 		fmt.Printf("Brightness set to %d.\n", kbBrightness)
 	}
 
-	if len(state) > 0 {
-		bundle["keyboard"] = state
-		_ = config.SaveStateBundle(bundle)
-	}
+	_ = saveKeyboardState(stateUpdates, lightbarState)
 
 	if profileRunner != nil {
 		fmt.Println("Profile software effect running. Press Ctrl+C to stop.")
@@ -268,6 +257,123 @@ func runKeyboard(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// saveKeyboardState applies the collected changes to the saved keyboard state.
+//
+// The load happens inside the lock and inside the same call as the save, which
+// is what makes `--color` keep the brightness and each `--key` keep the keys
+// set before it. lightbarState, when not nil, is written in the same update: a
+// profile carries both halves and they have to land together.
+func saveKeyboardState(updates []func(map[string]any), lightbarState map[string]any) error {
+	if len(updates) == 0 && lightbarState == nil {
+		return nil
+	}
+	return config.UpdateStateBundle(func(bundle map[string]any) error {
+		state, _ := bundle["keyboard"].(map[string]any)
+		if state == nil {
+			state = map[string]any{}
+		}
+		for _, update := range updates {
+			update(state)
+		}
+		bundle["keyboard"] = state
+		if lightbarState != nil {
+			bundle["lightbar"] = lightbarState
+		}
+		return nil
+	})
+}
+
+// The state* helpers below each describe one command: what it records, and
+// what it deliberately drops. Dropping used to happen by accident — the whole
+// keyboard state was replaced — which is how a per-key colour survived an
+// effect that had already painted over it.
+
+// stateSetBrightness records the brightness and nothing else. Brightness is
+// orthogonal to what is on the keys, and reload applies it either way.
+// stateSetBrightness also clears a leftover "off": after `--brightness 20` the
+// keyboard is lit, not off. Keeping mode=off would make the saved state say two
+// contradictory things, and reload resolves that contradiction the wrong way --
+// it calls ctrl.Off() and only then SetBrightness, lighting the keyboard back
+// up. That is exactly what the stateOff comment below warns about, so the state
+// must not be allowed to reach that shape in the first place.
+func stateSetBrightness(brightness int) func(map[string]any) {
+	return func(state map[string]any) {
+		state["brightness"] = float64(brightness)
+		if mode, _ := state["mode"].(string); mode == actionOff {
+			delete(state, "mode")
+		}
+	}
+}
+
+// stateSetEffect drops the colours: an animation owns every LED, so the static
+// colour and the per-key colours are gone from the hardware. Left in the state,
+// reload would repaint them over the running animation.
+func stateSetEffect(effect string, speed int) func(map[string]any) {
+	return func(state map[string]any) {
+		state["mode"] = actionEffect
+		state[actionEffect] = effect
+		state["speed"] = float64(speed)
+		delete(state, "color")
+		delete(state, "per_key")
+	}
+}
+
+// stateSetColorAll drops the effect and the per-key colours: SetAllKeys repaints
+// the whole grid, which is exactly what cancels both.
+func stateSetColorAll(r, g, b byte) func(map[string]any) {
+	return func(state map[string]any) {
+		state["mode"] = "static"
+		state["color"] = []any{float64(r), float64(g), float64(b)}
+		delete(state, actionEffect)
+		delete(state, "speed")
+		delete(state, "per_key")
+	}
+}
+
+// stateSetKeyColor changes one key and drops nothing. The base colour, the
+// brightness and the keys coloured before it are all still lit on the keyboard,
+// so they are all still true of the saved state.
+func stateSetKeyColor(key string, r, g, b byte) func(map[string]any) {
+	return func(state map[string]any) {
+		perKey, _ := state["per_key"].(map[string]any)
+		if perKey == nil {
+			perKey = map[string]any{}
+		}
+		perKey[strings.ToLower(key)] = []any{float64(r), float64(g), float64(b)}
+		state["per_key"] = perKey
+	}
+}
+
+// stateSetProfile drops everything the profile now owns, brightness included —
+// reload applies the state's brightness *after* loading the profile, so a
+// leftover value would override the profile's own. It survives only when the
+// user set it explicitly on the same command line.
+func stateSetProfile(path string, brightnessGiven bool) func(map[string]any) {
+	return func(state map[string]any) {
+		state["mode"] = "profile"
+		state["profile"] = path
+		delete(state, "color")
+		delete(state, actionEffect)
+		delete(state, "speed")
+		delete(state, "per_key")
+		if !brightnessGiven {
+			delete(state, "brightness")
+		}
+	}
+}
+
+// stateOff is the one command that does replace the whole state, and it has to:
+// reload applies the brightness and the per-key colours after ctrl.Off(), so
+// anything left behind here would light the keyboard straight back up.
+func stateOff() func(map[string]any) {
+	return func(state map[string]any) {
+		for key := range state {
+			delete(state, key)
+		}
+		state["mode"] = actionOff
+	}
 }
 
 // waitForEffect blocks until interrupted, keeping a software effect rendering.
