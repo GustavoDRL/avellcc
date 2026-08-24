@@ -102,6 +102,59 @@ go build -tags probe -o /tmp/gridpaint ./tools/gridpaint/
 go build -tags probe -o /tmp/probe8291 ./tools/probe8291/
 ```
 
+## Omarchy integration
+
+None of this exists upstream, and none of it ships in an upstream release.
+
+- **The theme paints the hardware.** `avellcc lightbar --theme` and
+  `avellcc keyboard --theme` read the Omarchy theme in force and write the bar
+  and the keyboard. The keyboard hook, `omarchy/50-avellcc-keyboard`, is one
+  line that calls the second one with an absolute path and a timeout.
+- **One settings file.** `~/.config/avellcc/lightbar.toml`, with `[theme]`,
+  `[pulse]` and `[keyboard]`, replaces the `AVELLCC_THEME_*` environment
+  variables, which are gone. `avellcc lightbar config {show,keys,get,set,path,reset}`
+  reads and writes it, keeping the file's comments; the writer takes a lock,
+  writes atomically and refuses to save a file it cannot parse back.
+- **The bar can follow the music.** `avellcc lightbar --pulse` reads cava,
+  gates on MPRIS and drives the bar. Ships as the `avellcc-pulse` user unit.
+- **One owner for the keyboard colour.** There used to be two: the theme hook
+  wrote the theme's accent and, up to three seconds later, the desktop's
+  now-playing daemon rewrote it with the wallpaper's — a visible jump. The
+  wallpaper wins now, and the hook goes through the same `--theme` path.
+- **A resume monitor.** `omarchy/avellcc-resume-monitor` re-applies state after
+  suspend, and no longer sends its diagnosis to `/dev/null`.
+
+All of it, with the measurements: [`omarchy-integration.md`](omarchy-integration.md).
+
+## What the three-wave audit changed
+
+An audit of the whole desktop stack landed in three passes (`c3bbcf8`,
+`f1e13a4`, `17f568a`). What changed in behaviour, as opposed to in tests:
+
+- `state.json` is written with the same discipline as `lightbar.toml` — lock,
+  atomic rename, read-back — instead of a bare `os.WriteFile`. A concurrent
+  reader used to catch the truncated file, get an empty bundle with no error,
+  and send the bar to white at brightness 100.
+- A keyboard command no longer erases the rest of the saved state: `--color`
+  keeps the stored brightness, and `--off` followed by `--brightness` no longer
+  saves a contradiction that the next `reload` resolves by turning the keyboard
+  back on.
+- The pulse daemon returns an error where it used to panic on a nil pointer
+  after a failed `Reopen()`, and the same latent nil was closed in the other
+  three controllers.
+- `avellcc reload` stops exiting 0 with "Keyboard reloaded" when every HID write
+  failed, and the effect runner stops discarding frame errors forever.
+- `accent-override` is honoured even when `theme.color_key` is not `auto`.
+- The `[keyboard]` section is visible to the two surfaces built to show it:
+  `lightbar --show-config` prints it and `config set` lists its keys. Both are
+  now driven by reflection over the toml tags, so a new field that reaches
+  neither surface fails a test.
+- `avellcc -v` reports the module version stamped into the binary instead of a
+  literal that had been "0.2.0" since the 0.2.0 tag.
+- `lightbar --help` names both controllers' vocabularies, and `--pulse-gain`
+  takes its default from the settings file's default instead of contradicting
+  it.
+
 ## Not addressed
 
 **Fan speed control.** Fan *readings* work: load the in-tree `uniwill_laptop`

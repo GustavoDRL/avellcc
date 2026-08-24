@@ -63,13 +63,25 @@ var lightbarCmd = &cobra.Command{
 }
 
 func init() {
-	effects := sortedKeys(lightbar.X58EffectCodes)
-	colors := sortedKeys(lightbar.X58ColorIDs)
+	// This runs before any detection, so the help text has to name BOTH
+	// controllers instead of picking one. Announcing only the ITE 8911
+	// vocabulary made `--help` on an ITE 8233 machine promise effects the
+	// command rejects (`breathe`) and hide the ones it accepts (`bounce`,
+	// `marquee`, `scan`), and read `--brightness (0-4)` as a full range when 4
+	// of 100 is a bar that looks dead. Which set applies is decided in
+	// runLightbar by what is on the USB bus; `avellcc lightbar` with no flags
+	// prints the set for the controller actually found.
+	x58Effects := strings.Join(sortedKeys(lightbar.X58EffectCodes), ", ")
+	x58Colors := strings.Join(sortedKeys(lightbar.X58ColorIDs), ", ")
+	bar8233Effects := strings.Join(lightbar.EffectNames8233(), ", ")
 
 	f := lightbarCmd.Flags()
-	f.StringVarP(&lbEffect, "effect", "e", "", fmt.Sprintf("Set effect (%s)", strings.Join(effects, ", ")))
-	f.StringVarP(&lbColor, "color", "c", "", fmt.Sprintf("Set color (%s)", strings.Join(colors, ", ")))
-	f.IntVarP(&lbBrightness, "brightness", "b", 0, "Set brightness (0-4)")
+	f.StringVarP(&lbEffect, "effect", "e", "",
+		fmt.Sprintf("Set effect (ITE 8911: %s / ITE 8233: %s)", x58Effects, bar8233Effects))
+	f.StringVarP(&lbColor, "color", "c", "",
+		fmt.Sprintf("Set color (ITE 8911: %s / ITE 8233: #RRGGBB, or the same names)", x58Colors))
+	f.IntVarP(&lbBrightness, "brightness", "b", 0,
+		fmt.Sprintf("Set brightness (ITE 8911: 0-4 / ITE 8233: 0-%d)", lightbar.MaxBrightness8233))
 	f.IntVarP(&lbSpeed, "speed", "s", 0, "Set animation speed")
 	f.BoolVar(&lbOff, "off", false, "Turn off lightbar")
 	f.StringVar(&lbEffectCode, "effect-code", "", "Set effect by raw hex code")
@@ -82,16 +94,21 @@ func init() {
 	f.BoolVar(&lbShowConfig, "show-config", false,
 		"Print the settings in force and where each came from")
 
-	// Pulse daemon
+	// Pulse daemon. The defaults come from DefaultLightbarSettings so the flag
+	// and the file cannot disagree — `--pulse-gain` said 1.25 while the file,
+	// pulse.DefaultConfig and the nine-line comment that recorded the
+	// measurement all said 2.0, which made the `--help` a third answer to a
+	// question that already had one.
+	pd := config.DefaultLightbarSettings().Pulse
 	f.BoolVar(&pulseEnable, "pulse", false,
 		"Run in the foreground, pulsing the bar in time with the music (needs cava)")
-	f.IntVar(&pulseFPS, "pulse-fps", 30, "Pulse frame rate in Hz")
+	f.IntVar(&pulseFPS, "pulse-fps", pd.FPS, "Pulse frame rate in Hz")
 	f.StringVar(&pulsePlayer, "pulse-player", defaultPulsePlayer, "MPRIS bus name to follow")
-	f.IntVar(&pulseMinBrightness, "pulse-min-brightness", 12, "Pulse brightness floor (0-100)")
-	f.IntVar(&pulseMaxBrightness, "pulse-max-brightness", 100, "Pulse brightness ceiling (0-100)")
-	f.StringVar(&pulseInputMethod, "pulse-input-method", "pipewire", "cava input method")
-	f.StringVar(&pulseInputSource, "pulse-input-source", "auto", "cava input source")
-	f.Float64Var(&pulseGain, "pulse-gain", 1.25,
+	f.IntVar(&pulseMinBrightness, "pulse-min-brightness", pd.MinBrightness, "Pulse brightness floor (0-100)")
+	f.IntVar(&pulseMaxBrightness, "pulse-max-brightness", pd.MaxBrightness, "Pulse brightness ceiling (0-100)")
+	f.StringVar(&pulseInputMethod, "pulse-input-method", pd.InputMethod, "cava input method")
+	f.StringVar(&pulseInputSource, "pulse-input-source", pd.InputSource, "cava input source")
+	f.Float64Var(&pulseGain, "pulse-gain", pd.Gain,
 		"Rescale loudness before brightness; corrects for cava normalising the loudest bar")
 	f.BoolVar(&pulseDebug, "pulse-debug", false,
 		"Print band energies and what is written to the bar, once a second")

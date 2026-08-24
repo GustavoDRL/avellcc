@@ -148,8 +148,14 @@ avellcc lightbar --pulse
   ├─ busctl        → resolves pulse.player to the bus name it owns now
   ├─ dbus-monitor  → MPRIS PlaybackStatus of that name
   ├─ cava          → 9 spectrum bars, raw binary, at --pulse-fps
-  └─ /dev/hidraw2  → 2 packets per frame, on a handle opened once
+  └─ /dev/hidrawN  → 2 packets per frame, on a handle opened once
 ```
+
+The `N` is deliberate: the number is enumeration order, not an address. It was
+`hidraw2` when this was written and is `hidraw1` today, with the touchpad now
+holding `hidraw2` — nothing here hardcodes it, and neither should you. The
+device is found by its vendor usage page; `avellcc lightbar config show --json`
+prints the path in force.
 
 `pulse.player` names the player, not the exact bus name. Some players never
 own the bare name: Omarchy Spotify's backend publishes
@@ -238,7 +244,7 @@ sweeping hue so a stall is visible rather than inferred:
 
 ```console
 $ go run ./tools/pulserate --rates 5,10,20,30,60 --seconds 3
-device /dev/hidraw2 (048d:7001)
+device /dev/hidraw2 (048d:7001)   # the number has changed since; see above
 
 target   achieved   frames     write err    worst write
 5        5.0        15         0            1.432814ms
