@@ -215,7 +215,14 @@ func (c *ITE8291) Close() error {
 }
 
 // sendCtrl sends one 8-byte command as a HID feature report.
+//
+// The nil check is the same one ITE8233.send carries: NewITE8291(nil) leaves
+// c.dev nil until Open() has succeeded, and an error is something a caller can
+// report while a nil dereference takes the whole process down.
 func (c *ITE8291) sendCtrl(payload ...byte) error {
+	if c.dev == nil {
+		return fmt.Errorf("ITE 8291 keyboard is not open")
+	}
 	if len(payload) > ctrlLen8291-1 {
 		return fmt.Errorf("command too long: %d bytes", len(payload))
 	}
@@ -226,6 +233,9 @@ func (c *ITE8291) sendCtrl(payload ...byte) error {
 
 // getCtrl reads the 8-byte reply to the last command.
 func (c *ITE8291) getCtrl() ([]byte, error) {
+	if c.dev == nil {
+		return nil, fmt.Errorf("ITE 8291 keyboard is not open")
+	}
 	buf, err := c.dev.GetFeatureReport(0x00, ctrlLen8291)
 	if err != nil {
 		return nil, err
@@ -263,6 +273,9 @@ func (c *ITE8291) enableUserMode() (bool, error) {
 
 // flushRow pushes one row of the framebuffer to the controller.
 func (c *ITE8291) flushRow(row int) error {
+	if c.dev == nil {
+		return fmt.Errorf("ITE 8291 keyboard is not open")
+	}
 	if err := c.sendCtrl(cmd8291SetRowIndex, 0x00, byte(row)); err != nil {
 		return err
 	}

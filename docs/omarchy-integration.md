@@ -24,19 +24,34 @@ stock theme provides** — `tokyo-night`, as `ff00ff`, a magenta that does not
 track that theme's palette. Honouring it would mean a magenta keyboard on one
 theme and no effect at all on the other twenty-one.
 
-The hook therefore reads `accent` from `colors.toml`, which every theme defines
-and which is the colour that most reads as the theme's identity. `keyboard.rgb`
-is honoured only when explicitly asked for.
+The hook therefore takes `accent`, which every theme defines and which is the
+colour that most reads as the theme's identity.
 
-| Variable | Default | Meaning |
+The whole hook is now one line, `avellcc keyboard --theme`, and what it does is
+configured in the `[keyboard]` section of `~/.config/avellcc/lightbar.toml` —
+the same file the light bar and the pulse daemon read.
+
+| Key in `[keyboard]` | Default | Meaning |
 |---|---|---|
-| `AVELLCC_THEME_COLOR_KEY` | `accent` | which `colors.toml` key to read |
-| `AVELLCC_THEME_BRIGHTNESS` | `8` | backlight level, 0–10 |
-| `AVELLCC_THEME_USE_KEYBOARD_RGB` | `0` | prefer the theme's `keyboard.rgb` |
+| `color_key` | `accent` | which `colors.toml` key to take |
+| `brightness` | `8` | backlight level, 0–10 |
+| `enabled` | `true` | paint the keyboard on a theme switch at all |
 
-Any key in `colors.toml` works, so `AVELLCC_THEME_COLOR_KEY=bright_magenta` or
-`foreground` are valid choices. Custom and installed themes work the same way —
-they carry a `colors.toml` like the stock ones.
+Any key in `colors.toml` works, so `color_key = "bright_magenta"` or
+`"foreground"` are valid choices. Custom and installed themes work the same way
+— they carry a `colors.toml` like the stock ones.
+
+`color_key = "accent"` is not just a default, it is the point: `accent` is the
+entry the now-playing integration overrides with the colour of the current
+wallpaper, and `--theme` resolves colours through `CurrentColors()`, which
+applies that override. So the wallpaper decides, and the hook's first write is
+already the right colour.
+
+Three environment variables used to live here — `AVELLCC_THEME_COLOR_KEY`,
+`AVELLCC_THEME_BRIGHTNESS` and `AVELLCC_THEME_USE_KEYBOARD_RGB`. The first two
+became `color_key` and `brightness` above. The third has no replacement: it was
+opt-in, off by default, and `keyboard.rgb` does not track its theme's palette.
+`avellcc keyboard --color <hex>` still sets a colour by hand.
 
 Every exit path in the hook is a success. A theme switch must never fail because
 the keyboard is missing or busy.

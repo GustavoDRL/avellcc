@@ -59,7 +59,7 @@ func TestPerKeyColoursAccumulate(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, key := range []string{"a", "b"} {
-		if err := saveKeyboardState([]func(map[string]any){stateSetKeyColor(key, 0x10, 0x20, 0x30)}, nil); err != nil {
+		if err := saveKeyboardState([]func(map[string]any){stateSetKeyColor(key, 0x10, 0x20, 0x30, false)}, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -83,7 +83,7 @@ func TestAnEffectDropsTheColoursItPaintedOver(t *testing.T) {
 	updates := []func(map[string]any){
 		stateSetBrightness(5),
 		stateSetColorAll(0x01, 0x02, 0x03),
-		stateSetKeyColor("esc", 0xFF, 0xFF, 0xFF),
+		stateSetKeyColor("esc", 0xFF, 0xFF, 0xFF, false),
 	}
 	if err := saveKeyboardState(updates, nil); err != nil {
 		t.Fatal(err)
@@ -116,7 +116,7 @@ func TestOffLeavesNothingThatWouldRelightTheKeyboard(t *testing.T) {
 	updates := []func(map[string]any){
 		stateSetBrightness(9),
 		stateSetColorAll(0x01, 0x02, 0x03),
-		stateSetKeyColor("esc", 0xFF, 0xFF, 0xFF),
+		stateSetKeyColor("esc", 0xFF, 0xFF, 0xFF, false),
 	}
 	if err := saveKeyboardState(updates, nil); err != nil {
 		t.Fatal(err)

@@ -6,42 +6,44 @@
 # Omarchy ships omarchy-theme-set-keyboard, but it only covers ASUS ROG and
 # Framework 16 keyboards; this covers the Avell Storm 470 (ITE 8291) via avellcc.
 #
-# Tunables, overridable from the environment:
-#   AVELLCC_THEME_COLOR_KEY        colors.toml key to read      (default: accent)
-#   AVELLCC_THEME_BRIGHTNESS       backlight level, 0-10        (default: 8)
-#   AVELLCC_THEME_USE_KEYBOARD_RGB honour the theme's           (default: 0)
-#                                  keyboard.rgb when it exists
+# There is nothing to configure here any more. Which colour, how bright, and
+# whether to do this at all are in the [keyboard] section of
+# ~/.config/avellcc/lightbar.toml, the same file the light bar and the pulse
+# daemon read:
+#
+#   avellcc keyboard --theme        # what this hook runs
+#
+# This used to carry a sed colour picker and three AVELLCC_THEME_* environment
+# variables. Both are gone, for the reason 51-avellcc-lightbar gives: the rule
+# lives in Go so every caller shares it, and the settings live in one file so
+# there is one place to look. AVELLCC_THEME_COLOR_KEY became keyboard.color_key
+# and AVELLCC_THEME_BRIGHTNESS became keyboard.brightness.
+# AVELLCC_THEME_USE_KEYBOARD_RGB has no replacement: one stock theme ships a
+# keyboard.rgb, its value does not track that theme's palette, and honouring it
+# was opt-in and off. `avellcc keyboard --color` still sets it by hand.
+#
+# Sharing the resolver is also what fixes the colour itself. The sed picker read
+# the theme's accent straight out of colors.toml and could not see the accent
+# override, so on a theme whose colours follow the wallpaper this hook wrote the
+# theme's pink (#FFB6D1) and the now-playing integration replaced it with the
+# wallpaper's (#8AA4B0) up to three seconds later. `--theme` reads the override,
+# so the first write is already the right colour.
+#
+# Every exit path is a success. A theme switch must never fail because the
+# keyboard is missing, busy, disabled, or on a machine that has none.
 
 set -uo pipefail
 
-THEME_DIR="$HOME/.local/state/omarchy/current/theme"
-COLORS_TOML="$THEME_DIR/colors.toml"
-KEYBOARD_RGB="$THEME_DIR/keyboard.rgb"
+# Absolute, like 51-avellcc-lightbar and avellcc-resume-monitor. A hook runs in
+# whatever environment omarchy-theme-set was invoked from, and a command missing
+# from that PATH would make this a silent no-op forever.
+AVELLCC="${AVELLCC_BIN:-$HOME/.local/bin/avellcc}"
+[[ -x $AVELLCC ]] || exit 0
 
-COLOR_KEY="${AVELLCC_THEME_COLOR_KEY:-accent}"
-BRIGHTNESS="${AVELLCC_THEME_BRIGHTNESS:-8}"
-USE_KEYBOARD_RGB="${AVELLCC_THEME_USE_KEYBOARD_RGB:-0}"
-
-# Nothing to do when the tool or the theme is missing. Hooks must never fail
-# the theme switch, so every exit here is a success.
-command -v avellcc >/dev/null 2>&1 || exit 0
-[[ -f $COLORS_TOML ]] || exit 0
-
-color=""
-
-# Only one stock theme ships keyboard.rgb today, and its value does not track
-# the theme's palette, so honouring it is opt-in.
-if [[ $USE_KEYBOARD_RGB == 1 && -f $KEYBOARD_RGB ]]; then
-	color=$(tr -d '#[:space:]' <"$KEYBOARD_RGB")
-fi
-
-if [[ -z $color ]]; then
-	color=$(sed -nE "s/^${COLOR_KEY}[[:space:]]*=[[:space:]]*\"?#?([0-9A-Fa-f]{6})\"?.*/\1/p" \
-		"$COLORS_TOML" | head -n 1)
-fi
-
-[[ $color =~ ^[0-9A-Fa-f]{6}$ ]] || exit 0
-
-avellcc keyboard --color "#$color" --brightness "$BRIGHTNESS" >/dev/null 2>&1
+# A wedged HIDIOCSFEATURE blocks for the usbhid control-transfer timeout, which
+# is bounded but not by anything this hook controls. This file sorts first of
+# the four in the glob, so without the timeout a stuck keyboard holds up every
+# hook behind it as well as the theme switch itself.
+timeout 5 "$AVELLCC" keyboard --theme >/dev/null 2>&1
 
 exit 0

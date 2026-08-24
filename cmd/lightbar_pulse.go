@@ -105,15 +105,7 @@ func runLightbarPulse(cmd *cobra.Command, ctrl *lightbar.ITE8233) error {
 
 	isPlaying := false
 	for ctx.Err() == nil {
-		// Settings are re-read here as well as inside a session, so a file
-		// edit made while nothing is playing is not held until the next track.
-		if reloaded, err := effectiveLightbarSettings(cmd); err != nil {
-			// A half-saved file is normal while someone is editing it. Say so
-			// once and keep the settings that were already working.
-			fmt.Fprintf(os.Stderr, "pulse: keeping the previous settings: %v\n", err)
-		} else if reloaded != settings {
-			settings = announceSettingsChange(settings, reloaded, player, mapper)
-		}
+		settings = pulseIdleRefresh(cmd, settings, player, mapper)
 
 		if !isPlaying || !settings.Pulse.Enabled {
 			select {
@@ -197,6 +189,47 @@ func awaitPalette(ctx context.Context) (omarchy.Palette, error) {
 		case <-time.After(2 * time.Second):
 		}
 	}
+}
+
+// pulseIdleRefresh re-reads everything that can change while nothing is
+// playing: the settings file *and* the applied theme.
+//
+// The palette used to be re-read only inside a cava session, which meant a
+// daemon that had never played a note kept whatever palette it started with,
+// forever. That is not hypothetical: this daemon starts at login, before
+// Omarchy publishes the theme, so awaitPalette answers with the *previous*
+// theme's colours — it covers "there is no theme yet", not "there is one, but
+// it is the old one". Measured on this machine: the daemon was pulsing
+// Catppuccin's #89b4fa/#f9e2af/#f5c2e7 while the applied theme resolved to
+// #8aa4b0/#ff4848/#6e8f7a, twelve seconds apart at boot and hours later still.
+func pulseIdleRefresh(cmd *cobra.Command, settings config.LightbarSettings,
+	player string, mapper *pulse.Mapper) config.LightbarSettings {
+
+	// Settings are re-read here as well as inside a session, so a file edit
+	// made while nothing is playing is not held until the next track.
+	if reloaded, err := effectiveLightbarSettings(cmd); err != nil {
+		// A half-saved file is normal while someone is editing it. Say so
+		// once and keep the settings that were already working.
+		fmt.Fprintf(os.Stderr, "pulse: keeping the previous settings: %v\n", err)
+	} else if reloaded != settings {
+		settings = announceSettingsChange(settings, reloaded, player, mapper)
+	}
+	refreshPalette(mapper)
+	return settings
+}
+
+// refreshPalette re-reads the applied theme and moves the mapper onto it when
+// it has changed. An unreadable theme leaves the colours in force: a theme
+// switch replaces colors.toml, and losing the palette for the instant that file
+// is missing would flash the bar.
+func refreshPalette(mapper *pulse.Mapper) {
+	p, err := omarchy.CurrentPalette()
+	if err != nil || p == mapper.Palette() {
+		return
+	}
+	mapper.SetPalette(p)
+	fmt.Fprintf(os.Stderr, "pulse: theme changed; bass %s, mid %s, treble %s\n",
+		p.Bass.Hex(), p.Mid.Hex(), p.Treble.Hex())
 }
 
 // announceSettingsChange applies what can be applied in place and says what
@@ -350,11 +383,7 @@ func runCavaSession(ctx context.Context, cmd *cobra.Command, ctrl *lightbar.ITE8
 		}
 		reload = time.Now()
 
-		if p, err := omarchy.CurrentPalette(); err == nil && p != mapper.Palette() {
-			mapper.SetPalette(p)
-			fmt.Fprintf(os.Stderr, "pulse: theme changed; bass %s, mid %s, treble %s\n",
-				p.Bass.Hex(), p.Mid.Hex(), p.Treble.Hex())
-		}
+		refreshPalette(mapper)
 
 		reloaded, err := effectiveLightbarSettings(cmd)
 		if err != nil {

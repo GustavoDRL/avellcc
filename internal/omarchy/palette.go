@@ -101,16 +101,35 @@ func ReadColors(path string) (map[string]RGB, error) {
 	return colors, nil
 }
 
-// CurrentPalette reads the applied theme and derives the pulse palette.
-func CurrentPalette() (Palette, error) {
+// CurrentColors reads the applied theme's colours with the accent override
+// already applied.
+//
+// Every caller that wants "the colour the theme is showing right now" has to
+// come through here. Reading ColorsPath() directly is what made the override
+// exist only for `color_key = "auto"`: the palette applied it, and the callers
+// that indexed the file by key never saw it — so a user writing
+// `color_key = "accent"`, asking in as many words for the accent, got the
+// theme's file value while the bar's "auto" followed the override.
+func CurrentColors() (map[string]RGB, error) {
 	colors, err := ReadColors(ColorsPath())
 	if err != nil {
-		return Palette{}, err
+		return nil, err
 	}
 	// An override stands in for the theme's accent while it is in force; see
-	// override.go. Mid and treble are still derived, so they move with it.
+	// override.go. ReadColors returns a fresh map per call, so writing into it
+	// here cannot leak into another caller.
 	if c, ok := AccentOverride(); ok {
 		colors["accent"] = c
+	}
+	return colors, nil
+}
+
+// CurrentPalette reads the applied theme and derives the pulse palette. Mid and
+// treble are derived from the accent, so they move with the override too.
+func CurrentPalette() (Palette, error) {
+	colors, err := CurrentColors()
+	if err != nil {
+		return Palette{}, err
 	}
 	return PaletteFrom(colors), nil
 }

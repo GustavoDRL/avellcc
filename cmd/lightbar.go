@@ -198,11 +198,10 @@ func runLightbar(cmd *cobra.Command, args []string) error {
 	}
 
 	if hasUpdate {
-		currentBundle := config.LoadStateBundle()
-		currentLB, _ := currentBundle["lightbar"].(map[string]any)
-		if currentLB == nil {
-			currentLB = map[string]any{}
-		}
+		// Read once to decide what to send: a flag the user did not give falls
+		// back to what is stored, so changing one setting does not reset the
+		// others.
+		currentLB, _ := config.LoadStateBundle()["lightbar"].(map[string]any)
 
 		updates := map[string]any{"mode": "active"}
 		if effectCode != nil {
@@ -244,7 +243,7 @@ func runLightbar(cmd *cobra.Command, args []string) error {
 		if err := ctrl.X58Apply(applyEffect, applyColor, applyBrightness, applySpeed); err != nil {
 			return err
 		}
-		_ = config.SaveLightbarState(savedState)
+		_ = updateLightbarX58State(updates)
 
 		effectName, _ := savedState["effect"].(string)
 		if effectName == "" {
@@ -411,4 +410,20 @@ func lightbarStatus(ctrl *lightbar.ITE8911) {
 	colors := sortedKeys(lightbar.X58ColorIDs)
 	fmt.Printf("\nEffects: %s\n", strings.Join(effects, ", "))
 	fmt.Printf("Colors:  %s\n", strings.Join(colors, ", "))
+}
+
+// updateLightbarX58State writes the fields this command changed into the saved
+// state, inside the state lock.
+//
+// The read that decides what to *send* still happens before the device write —
+// it has to, since an unset flag falls back to the stored value — but the save
+// re-reads. Writing the map read before the write would put every field back as
+// it was then, undoing a hook that wrote the bar while the HID transfer was in
+// flight, and that transfer is the slow part.
+func updateLightbarX58State(updates map[string]any) error {
+	return config.UpdateStateBundle(func(bundle map[string]any) error {
+		stored, _ := bundle["lightbar"].(map[string]any)
+		bundle["lightbar"] = config.MergeLightbarState(stored, updates)
+		return nil
+	})
 }

@@ -55,7 +55,7 @@ func runLightbar8233(cmd *cobra.Command, path string, product uint16) error {
 		if !settings.Theme.Enabled {
 			return nil
 		}
-		if lbColor, err = themeLightbarColor(settings.Theme.ColorKey); err != nil {
+		if lbColor, err = themeColor(settings.Theme.ColorKey); err != nil {
 			return err
 		}
 		// The settings file stands in for the saved state on this path, so a
@@ -114,8 +114,7 @@ func runLightbar8233(cmd *cobra.Command, path string, product uint16) error {
 		if err := ctrl.Off(); err != nil {
 			return err
 		}
-		state["mode"] = actionOff
-		_ = config.SaveLightbarState(state)
+		_ = updateLightbar8233State(map[string]any{"mode": actionOff})
 		fmt.Println("Lightbar off.")
 		return nil
 	}
@@ -183,19 +182,49 @@ func runLightbar8233(cmd *cobra.Command, path string, product uint16) error {
 		return err
 	}
 
-	state["mode"] = "active"
-	state["effect"] = effect
-	state["color"] = fmt.Sprintf("#%02x%02x%02x", color[0], color[1], color[2])
-	state["brightness"] = float64(brightness)
-	state["speed"] = float64(speed)
-	// Whether the animation ran on one colour or on the rainbow is not
-	// recoverable from the colour alone, and reload has to reproduce it.
-	state["solid_color"] = lbColor != ""
-	_ = config.SaveLightbarState(state)
+	hex := fmt.Sprintf("#%02x%02x%02x", color[0], color[1], color[2])
+	_ = updateLightbar8233State(map[string]any{
+		"mode":       "active",
+		"effect":     effect,
+		"color":      hex,
+		"brightness": float64(brightness),
+		"speed":      float64(speed),
+		// Whether the animation ran on one colour or on the rainbow is not
+		// recoverable from the colour alone, and reload has to reproduce it.
+		"solid_color": lbColor != "",
+	})
 
 	fmt.Printf("Lightbar updated: effect=%s, color=%s, brightness=%d, speed=%d.\n",
-		effect, state["color"], brightness, speed)
+		effect, hex, brightness, speed)
 	return nil
+}
+
+// updateLightbar8233State writes the given fields into the saved chassis-bar
+// state inside the state lock, keeping the controller marker and the fields
+// this command did not touch.
+//
+// The read that decides what to *send* still happens before the device write —
+// it has to, since an unset flag falls back to the stored value — but re-reading
+// here means a state written meanwhile is not rolled back to what the file said
+// before the HID transfer, and the HID transfer is the slow part. The other
+// writers of this file are the theme hook, the now-playing hook, the pulse
+// daemon restoring the bar, and `avellcc reload`.
+func updateLightbar8233State(fields map[string]any) error {
+	return config.UpdateStateBundle(func(bundle map[string]any) error {
+		state, _ := bundle["lightbar"].(map[string]any)
+		// State left behind by the ITE 8911 driver is a different shape and
+		// must not be merged into this one — the same rule, and the same
+		// marker, as loadLightbar8233State.
+		if controller, _ := config.GetString(state, "controller"); controller != lb8233StateKey {
+			state = map[string]any{}
+		}
+		state["controller"] = lb8233StateKey
+		for k, v := range fields {
+			state[k] = v
+		}
+		bundle["lightbar"] = state
+		return nil
+	})
 }
 
 // restoreLightbar8233State reapplies the saved chassis-bar state. The boot

@@ -27,6 +27,11 @@ import (
 type LightbarSettings struct {
 	Theme ThemeSettings `toml:"theme" json:"theme"`
 	Pulse PulseSettings `toml:"pulse" json:"pulse"`
+	// The keyboard backlight rides in the same file; see keyboard_settings.go.
+	// The field has to exist here even for a file that has no [keyboard]
+	// section, because DecodeLightbarSettings rejects unknown keys — without
+	// it, adding the section would make the whole file unloadable.
+	Keyboard KeyboardSettings `toml:"keyboard" json:"keyboard"`
 }
 
 // ThemeSettings is what the bar shows at rest: the colour the theme-set hook
@@ -72,6 +77,7 @@ func DefaultLightbarSettings() LightbarSettings {
 			InputMethod:   "pipewire",
 			InputSource:   "auto",
 		},
+		Keyboard: DefaultKeyboardSettings(),
 	}
 }
 
@@ -188,7 +194,8 @@ func (s LightbarSettings) Validate() error {
 			return fmt.Errorf("%s: %w", name, err)
 		}
 	}
-	return nil
+	// The keyboard half validates itself, next to the struct that declares it.
+	return s.Keyboard.Validate()
 }
 
 // CavaInputMethods is cava's own list, as it prints when given an unknown one.
@@ -230,10 +237,13 @@ func validBusSegment(name string) error {
 // DefaultLightbarSettingsFile is the commented file written on first install.
 // It is written once and never rewritten, so a user's edits and comments are
 // never clobbered by an upgrade.
-const DefaultLightbarSettingsFile = `# Chassis light bar — one file for both halves of the integration.
+const DefaultLightbarSettingsFile = defaultLightbarSettingsFileBody + DefaultKeyboardSettingsSection
+
+const defaultLightbarSettingsFileBody = `# Chassis light bar and keyboard backlight — one file for the integration.
 #
 # [theme] is what the bar shows at rest, written after every ` + "`omarchy theme set`" + `.
 # [pulse] is what it does while music plays.
+# [keyboard] is what the keyboard backlight shows at rest, from the same hook.
 #
 # Every key mirrors a flag on ` + "`avellcc lightbar`" + `, and a flag wins over this file,
 # so you can try a value before committing to it:

@@ -213,9 +213,14 @@ func (m *KeyboardPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.brightness = 0
 				m.effectIdx = 0
 				m.applied = "Keyboard off"
-				bundle := config.LoadStateBundle()
-				bundle["keyboard"] = map[string]any{"mode": "off"}
-				_ = config.SaveStateBundle(bundle)
+				// Locked, like every other write of this file: SaveStateBundle
+				// replaces the whole thing, so a load here and a save a moment
+				// later drops whatever a theme hook wrote to the lightbar half
+				// in between.
+				_ = config.UpdateStateBundle(func(bundle map[string]any) error {
+					bundle["keyboard"] = map[string]any{"mode": "off"}
+					return nil
+				})
 			}
 
 		case "r":
@@ -306,8 +311,11 @@ func (m *KeyboardPanel) applySelection() {
 	}
 }
 
+// saveState records what the panel is showing. The load-modify-save runs
+// inside config.UpdateStateBundle's lock: the panel is interactive, so the
+// window between reading the file and writing it is as long as the user's next
+// keystroke, and the theme and now-playing hooks write the same file.
 func (m *KeyboardPanel) saveState() {
-	bundle := config.LoadStateBundle()
 	state := map[string]any{
 		"brightness": float64(m.brightness),
 	}
@@ -323,8 +331,10 @@ func (m *KeyboardPanel) saveState() {
 		state["color"] = []any{float64(c.r), float64(c.g), float64(c.b)}
 	}
 
-	bundle["keyboard"] = state
-	_ = config.SaveStateBundle(bundle)
+	_ = config.UpdateStateBundle(func(bundle map[string]any) error {
+		bundle["keyboard"] = state
+		return nil
+	})
 }
 
 func (m *KeyboardPanel) View() tea.View {

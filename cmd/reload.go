@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -32,6 +33,13 @@ func runReload(cmd *cobra.Command, args []string) error {
 	}
 
 	reloaded := false
+	// A device that is not there is not a failure: this command runs from the
+	// boot service and from the resume hook, on machines that may have neither
+	// controller. A device that IS there and rejected every write is a failure,
+	// and it used to be indistinguishable from success — same message, same
+	// exit 0 — which is what let a keyboard come back blank after a resume with
+	// nothing in the journal to say so.
+	var failed error
 
 	// Keyboard
 	if kbState, ok := bundle["keyboard"].(map[string]any); ok && len(kbState) > 0 {
@@ -41,10 +49,16 @@ func runReload(cmd *cobra.Command, args []string) error {
 		} else if err := ctrl.Open(); err != nil {
 			fmt.Printf("Keyboard: %v, skipping.\n", err)
 		} else {
-			reloadKeyboardState(ctrl, kbState)
+			err := reloadKeyboardState(ctrl, kbState)
 			_ = ctrl.Close()
-			fmt.Println("Keyboard reloaded.")
-			reloaded = true
+			if err != nil {
+				// Not printed here as well: Execute prints the returned error
+				// and exits 1, which is the whole point of returning it.
+				failed = errors.Join(failed, fmt.Errorf("keyboard: %w", err))
+			} else {
+				fmt.Println("Keyboard reloaded.")
+				reloaded = true
+			}
 		}
 	}
 
@@ -58,18 +72,33 @@ func runReload(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if !reloaded {
+	if !reloaded && failed == nil {
 		fmt.Println("No saved state found.")
 	}
 
-	return nil
+	return failed
 }
 
-func reloadKeyboardState(ctrl keyboard.Controller, kbState map[string]any) {
+// reloadKeyboardState re-applies one saved keyboard state and reports what the
+// hardware refused.
+//
+// Every write is attempted even after one fails — a brightness that did not
+// land is no reason to skip the colours — so the errors are joined rather than
+// returned at the first one. Discarding them was the actual defect: `avellcc
+// reload` printed "Keyboard reloaded." and exited 0 with all five writes
+// rejected, and the resume monitor's `|| true` then hid even the exit code.
+func reloadKeyboardState(ctrl keyboard.Controller, kbState map[string]any) error {
+	var failed error
+	fail := func(what string, err error) {
+		if err != nil {
+			failed = errors.Join(failed, fmt.Errorf("%s: %w", what, err))
+		}
+	}
+
 	mode, _ := kbState["mode"].(string)
 	switch mode {
 	case "off":
-		_ = ctrl.Off()
+		fail("switching the backlight off", ctrl.Off())
 	case "effect":
 		effect, _ := kbState["effect"].(string)
 		if effect != "" {
@@ -78,7 +107,7 @@ func reloadKeyboardState(ctrl keyboard.Controller, kbState map[string]any) {
 				speed = s
 			}
 			if animID, ok := ctrl.HWEffects()[strings.ToLower(effect)]; ok {
-				_ = ctrl.SetHWAnimation(animID, speed)
+				fail("starting the hardware effect", ctrl.SetHWAnimation(animID, speed))
 			} else {
 				swName := strings.ToLower(effect)
 				if !strings.HasPrefix(swName, "sw_") {
@@ -98,12 +127,13 @@ func reloadKeyboardState(ctrl keyboard.Controller, kbState map[string]any) {
 			r, _ := config.GetInt(map[string]any{"v": colorArr[0]}, "v")
 			g, _ := config.GetInt(map[string]any{"v": colorArr[1]}, "v")
 			b, _ := config.GetInt(map[string]any{"v": colorArr[2]}, "v")
-			_ = ctrl.SetAllKeys(byte(r), byte(g), byte(b))
+			fail("painting every key", ctrl.SetAllKeys(byte(r), byte(g), byte(b)))
 		}
 	case "profile":
 		profilePath, _ := kbState["profile"].(string)
 		if profilePath != "" {
-			_, runner, _ := loadProfile(ctrl, profilePath)
+			_, runner, err := loadProfile(ctrl, profilePath)
+			fail("loading the profile", err)
 			if runner != nil {
 				runner.Stop()
 				fmt.Printf("Keyboard: profile %q contains a software effect, which "+
@@ -113,7 +143,7 @@ func reloadKeyboardState(ctrl keyboard.Controller, kbState map[string]any) {
 	}
 
 	if brightness, ok := config.GetInt(kbState, "brightness"); ok {
-		_ = ctrl.SetBrightness(brightness)
+		fail("setting the brightness", ctrl.SetBrightness(brightness))
 	}
 
 	if perKey, ok := kbState["per_key"].(map[string]any); ok {
@@ -125,11 +155,13 @@ func reloadKeyboardState(ctrl keyboard.Controller, kbState map[string]any) {
 					r, _ := config.GetInt(map[string]any{"v": colorArr[0]}, "v")
 					g, _ := config.GetInt(map[string]any{"v": colorArr[1]}, "v")
 					b, _ := config.GetInt(map[string]any{"v": colorArr[2]}, "v")
-					_ = ctrl.SetKeyColor(pos[0], pos[1], byte(r), byte(g), byte(b))
+					fail("painting key "+keyName, ctrl.SetKeyColor(pos[0], pos[1], byte(r), byte(g), byte(b)))
 				}
 			}
 		}
 	}
+
+	return failed
 }
 
 func restoreLightbarState(lbState map[string]any, ctrl *lightbar.ITE8911) error {

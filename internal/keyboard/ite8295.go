@@ -68,7 +68,13 @@ func (c *ITE8295) Close() error {
 	return nil
 }
 
+// The nil check is the same one ITE8233.send carries: NewITE8295(nil) leaves
+// c.dev nil until Open() has succeeded, and an error is something a caller can
+// report while a nil dereference takes the whole process down.
 func (c *ITE8295) send(cmd, a1, a2, a3, a4 int) error {
+	if c.dev == nil {
+		return fmt.Errorf("ITE 8295 keyboard is not open")
+	}
 	buf := []byte{ReportID, byte(cmd), byte(a1), byte(a2), byte(a3), byte(a4), 0x00}
 	return c.dev.SendFeatureReport(buf)
 }
@@ -124,6 +130,9 @@ func (c *ITE8295) Off() error {
 
 // GetFirmwareInfo reads firmware info from report 0x5A.
 func (c *ITE8295) GetFirmwareInfo() ([]byte, error) {
+	if c.dev == nil {
+		return nil, fmt.Errorf("ITE 8295 keyboard is not open")
+	}
 	return c.dev.GetFeatureReport(0x5A, 17)
 }
 

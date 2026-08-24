@@ -141,7 +141,14 @@ func (c *ITE8911) ReadReportDescriptor() ([]byte, error) {
 }
 
 // GetFeature reads a HID feature report.
+//
+// The nil check is the same one ITE8233.send carries: NewITE8911(nil) leaves
+// c.dev nil until Open() has succeeded, and an error is something a caller can
+// report while a nil dereference takes the whole process down.
 func (c *ITE8911) GetFeature(reportID byte, length int) ([]byte, error) {
+	if c.dev == nil {
+		return nil, fmt.Errorf("ITE 8911 lightbar is not open")
+	}
 	return c.dev.GetFeatureReport(reportID, length)
 }
 
@@ -153,6 +160,9 @@ func (c *ITE8911) SendFeature(reportID byte, payload []byte, totalSize int) erro
 	maxPayload := totalSize - 1
 	if len(payload) > maxPayload {
 		return fmt.Errorf("payload too large: %d bytes (max %d)", len(payload), maxPayload)
+	}
+	if c.dev == nil {
+		return fmt.Errorf("ITE 8911 lightbar is not open")
 	}
 	buf := make([]byte, totalSize)
 	buf[0] = reportID
