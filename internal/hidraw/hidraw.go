@@ -98,6 +98,34 @@ func (d *HidrawDevice) Close() error {
 	return nil
 }
 
+// ReportKind names the three transfer paths below, so a capture hook can tell
+// a feature write from a feature read from an output report.
+type ReportKind string
+
+const (
+	ReportSetFeature ReportKind = "set-feature"
+	ReportGetFeature ReportKind = "get-feature"
+	ReportOutput     ReportKind = "output"
+)
+
+// CaptureForTests replaces the kernel on all three transfer paths while it is
+// non-nil: it is handed the very buffer that would have gone to the ioctl (or,
+// on a read, the buffer the reply has to be written into) and its error is what
+// the caller sees.
+//
+// It exists for one reason. The packets in this repo are only correct byte for
+// byte: the ITE 8233's variant byte 0x22 is a DIFFERENT command on a sibling
+// MCU, and sending the wrong one parked this machine's bar in a mode that a
+// power cycle did not undo. Nothing could read those bytes back without a
+// controller attached, so nothing stopped a one-byte edit from shipping green.
+// Every assignment to this variable lives in a _test.go file; production leaves
+// it nil and pays one nil comparison per transfer.
+//
+// It is consulted AFTER the "is not open" guard on purpose: a test that wants
+// the bytes still has to open a device — a temp file is enough — so the guards
+// keep being exercised instead of being bypassed by the seam.
+var CaptureForTests func(d *HidrawDevice, kind ReportKind, buf []byte) error
+
 // SendFeatureReport sends a SET_FEATURE report. buf[0] must be the report ID.
 //
 // A closed device is refused by name instead of by errno. Without the guard the
@@ -108,6 +136,14 @@ func (d *HidrawDevice) Close() error {
 func (d *HidrawDevice) SendFeatureReport(buf []byte) error {
 	if !d.open {
 		return fmt.Errorf("hidraw device %s is not open", d.Path)
+	}
+	// &buf[0] on an empty slice panics, and a panic inside the pulse daemon
+	// takes the unit down where an error would only cost a frame.
+	if len(buf) == 0 {
+		return fmt.Errorf("hidraw device %s: empty feature report", d.Path)
+	}
+	if CaptureForTests != nil {
+		return CaptureForTests(d, ReportSetFeature, buf)
 	}
 	_, _, errno := unix.Syscall(
 		unix.SYS_IOCTL,
@@ -126,8 +162,18 @@ func (d *HidrawDevice) GetFeatureReport(reportID byte, length int) ([]byte, erro
 	if !d.open {
 		return nil, fmt.Errorf("hidraw device %s is not open", d.Path)
 	}
+	// Same reason as the write path: buf[0] on a zero-length report panics.
+	if length <= 0 {
+		return nil, fmt.Errorf("hidraw device %s: feature report length must be positive, got %d", d.Path, length)
+	}
 	buf := make([]byte, length)
 	buf[0] = reportID
+	if CaptureForTests != nil {
+		if err := CaptureForTests(d, ReportGetFeature, buf); err != nil {
+			return nil, err
+		}
+		return buf, nil
+	}
 	_, _, errno := unix.Syscall(
 		unix.SYS_IOCTL,
 		uintptr(d.fd),
@@ -195,6 +241,15 @@ func ReportDescriptor(devPath string) ([]byte, error) {
 func (d *HidrawDevice) Write(buf []byte) error {
 	if !d.open {
 		return fmt.Errorf("hidraw device %s is not open", d.Path)
+	}
+	// An empty output report is not a report: unix.Write returns 0/nil and the
+	// short-write check below is satisfied by 0 == 0, so the caller would be
+	// told the row went out when nothing did.
+	if len(buf) == 0 {
+		return fmt.Errorf("hidraw device %s: empty output report", d.Path)
+	}
+	if CaptureForTests != nil {
+		return CaptureForTests(d, ReportOutput, buf)
 	}
 	n, err := unix.Write(d.fd, buf)
 	if err != nil {

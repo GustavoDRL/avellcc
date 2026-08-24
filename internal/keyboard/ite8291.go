@@ -73,8 +73,15 @@ type ITE8291 struct {
 	// without the caller having to resend the whole keyboard.
 	fb [Rows8291][Cols8291][3]byte
 
-	brightness int  // last requested level, on the 0-10 scale
-	userMode   bool // whether per-key control is currently active
+	// hwBright is the brightness on the CONTROLLER's own 0-50 scale, not on
+	// the 0-10 scale the CLI speaks. Keeping the 0-10 value here instead cost
+	// up to four hardware steps per open: readState quantised the 0-50 it had
+	// just read down to 0-10 (48 -> 9) and enableUserMode wrote it back out
+	// (9 -> 45), so every hook and every resume darkened the keyboard a little
+	// more until it settled on a multiple of five. The conversion belongs at
+	// the CLI boundary — SetBrightness — and nowhere else.
+	hwBright byte
+	userMode bool // whether per-key control is currently active
 
 	lastSave time.Time
 }
@@ -132,7 +139,7 @@ func (c *ITE8291) saveFramebuffer(force bool) {
 
 // NewITE8291 creates a new controller. If dev is nil, it auto-discovers the device.
 func NewITE8291(dev *hidraw.HidrawDevice) *ITE8291 {
-	return &ITE8291{dev: dev, ownsDev: dev == nil, brightness: MaxBrightness}
+	return &ITE8291{dev: dev, ownsDev: dev == nil, hwBright: hwBrightness(MaxBrightness)}
 }
 
 // Name identifies the controller in user-facing output.
@@ -198,9 +205,11 @@ func (c *ITE8291) readState() {
 		return
 	}
 	// Reply layout: [echo, control, effect, speed, brightness, colour, ...]
-	control, effect, hw := buf[1], buf[2], int(buf[4])
-	if hw >= 0 && hw <= hwMaxBrightness8291 {
-		c.brightness = hw * MaxBrightness / hwMaxBrightness8291
+	// buf[4] is a byte, so the old `hw >= 0` half of this test could never
+	// fail; only the upper bound tells a real reply from a garbled one.
+	control, effect, hw := buf[1], buf[2], buf[4]
+	if hw <= hwMaxBrightness8291 {
+		c.hwBright = hw
 	}
 	c.userMode = control != ctrl8291Off && effect == effect8291UserMode
 }
@@ -263,7 +272,7 @@ func (c *ITE8291) enableUserMode() (bool, error) {
 		return false, nil
 	}
 	err := c.sendCtrl(cmd8291SetEffect, ctrl8291Apply, effect8291UserMode,
-		0x00, hwBrightness(c.brightness), 0x00, 0x00, 0x00)
+		0x00, c.hwBright, 0x00, 0x00, 0x00)
 	if err != nil {
 		return false, err
 	}
@@ -307,8 +316,8 @@ func (c *ITE8291) SetBrightness(level int) error {
 	if level > MaxBrightness {
 		level = MaxBrightness
 	}
-	c.brightness = level
-	return c.sendCtrl(cmd8291SetBright, ctrl8291Apply, hwBrightness(level))
+	c.hwBright = hwBrightness(level)
+	return c.sendCtrl(cmd8291SetBright, ctrl8291Apply, c.hwBright)
 }
 
 // SetKeyColor sets the color of a single key by grid position.
@@ -391,7 +400,7 @@ func (c *ITE8291) SetHWAnimation(animID, speed int) error {
 	}
 	c.userMode = false
 	return c.sendCtrl(cmd8291SetEffect, ctrl8291Apply, byte(animID),
-		byte(speed), hwBrightness(c.brightness), 0x00, 0x00, 0x00)
+		byte(speed), c.hwBright, 0x00, 0x00, 0x00)
 }
 
 // SetPaletteColor sets one of the seven hardware palette slots (1-7) used by
