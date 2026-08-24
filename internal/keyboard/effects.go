@@ -2,13 +2,21 @@ package keyboard
 
 import (
 	"context"
+	"fmt"
+	"log"
 	"math"
 	"sync"
 	"time"
 )
 
 // EffectFunc is a per-frame effect function. frame counts from 0.
-type EffectFunc func(ctrl Controller, frame int, opts EffectOpts)
+//
+// It returns what the controller refused. The three effects below used to
+// write `_ = ctrl.SetKeyMap(...)`, so a keyboard that rejected every single
+// frame was indistinguishable from one lighting up: no error, no exit code, no
+// journal line. That is the same failure the `reload` command's errors.Join
+// exists to expose, and it was still being discarded here.
+type EffectFunc func(ctrl Controller, frame int, opts EffectOpts) error
 
 // EffectOpts holds parameters for software effects.
 type EffectOpts struct {
@@ -27,6 +35,19 @@ type EffectRunner struct {
 	fps    int
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	// Diagnostics for the frames the controller refused.
+	//
+	// A software effect writes fps frames a second — 30 by default — so a
+	// device that refuses every write would emit 30 identical lines a second
+	// if each one were logged. Only the FIRST is announced, right away, so
+	// something reaches the journal while the effect is still running; the
+	// rest are counted and reported once, by Err and by Stop.
+	mu       sync.Mutex
+	firstErr error
+	failed   int
+	frames   int
+	logf     func(format string, v ...any)
 }
 
 // NewEffectRunner creates a new runner for the given controller.
@@ -34,12 +55,27 @@ func NewEffectRunner(ctrl Controller, fps int) *EffectRunner {
 	if fps <= 0 {
 		fps = 30
 	}
-	return &EffectRunner{ctrl: ctrl, fps: fps}
+	return &EffectRunner{ctrl: ctrl, fps: fps, logf: log.Printf}
+}
+
+// SetLogger replaces where the first refused frame is announced. Only tests
+// use it; everything else wants the default, which is the standard logger and
+// therefore stderr — the journal, for the systemd units that run this.
+func (r *EffectRunner) SetLogger(logf func(format string, v ...any)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.logf = logf
 }
 
 // Start begins running the effect in a goroutine.
 func (r *EffectRunner) Start(fn EffectFunc, opts EffectOpts) {
 	r.Stop()
+	// A new effect starts with a clean tally, so Err never reports the
+	// previous effect's refusals against this one.
+	r.mu.Lock()
+	r.firstErr, r.failed, r.frames = nil, 0, 0
+	r.mu.Unlock()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	r.cancel = cancel
 	r.wg.Add(1)
@@ -49,12 +85,46 @@ func (r *EffectRunner) Start(fn EffectFunc, opts EffectOpts) {
 	}()
 }
 
-// Stop stops the running effect and waits for cleanup.
-func (r *EffectRunner) Stop() {
+// Stop stops the running effect, waits for cleanup, and returns what the
+// controller refused while it ran. Callers that ignore the value still
+// compile; the value is there for the ones that do not.
+func (r *EffectRunner) Stop() error {
 	if r.cancel != nil {
 		r.cancel()
 		r.wg.Wait()
 		r.cancel = nil
+	}
+	return r.Err()
+}
+
+// Err reports the refused frames as one error, and may be called while the
+// effect is still running.
+func (r *EffectRunner) Err() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.firstErr == nil {
+		return nil
+	}
+	return fmt.Errorf("%d of %d frames were refused by %s; the first: %w",
+		r.failed, r.frames, r.ctrl.Name(), r.firstErr)
+}
+
+// recordFrame tallies one frame and announces the first failure.
+func (r *EffectRunner) recordFrame(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.frames++
+	if err == nil {
+		return
+	}
+	r.failed++
+	if r.firstErr != nil {
+		return
+	}
+	r.firstErr = err
+	if r.logf != nil {
+		r.logf("avellcc: the keyboard refused a frame of the software effect; "+
+			"further failures will only be counted: %v", err)
 	}
 }
 
@@ -69,7 +139,11 @@ func (r *EffectRunner) runLoop(ctx context.Context, fn EffectFunc, opts EffectOp
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			fn(r.ctrl, frame, opts)
+			// The loop keeps going after a refusal on purpose: one dropped
+			// frame is no reason to leave the keyboard stuck on the previous
+			// one, and a device that is really gone shows up as a failure
+			// count equal to the frame count.
+			r.recordFrame(fn(r.ctrl, frame, opts))
 			frame++
 		}
 	}
@@ -103,7 +177,7 @@ func hsvToRGB(h, s, v float64) (byte, byte, byte) {
 }
 
 // RainbowWave is a rainbow wave effect — hue shifts across columns.
-func RainbowWave(ctrl Controller, frame int, opts EffectOpts) {
+func RainbowWave(ctrl Controller, frame int, opts EffectOpts) error {
 	rows, cols := ctrl.Rows(), ctrl.Cols()
 	colorMap := make(map[[2]int][3]byte, rows*cols)
 	for row := 0; row < rows; row++ {
@@ -115,21 +189,21 @@ func RainbowWave(ctrl Controller, frame int, opts EffectOpts) {
 	}
 	// One batched update per frame: controllers that push whole rows would
 	// otherwise need a separate transfer for every key.
-	_ = ctrl.SetKeyMap(colorMap)
+	return ctrl.SetKeyMap(colorMap)
 }
 
 // Breathing is a pulsing brightness effect.
-func Breathing(ctrl Controller, frame int, opts EffectOpts) {
+func Breathing(ctrl Controller, frame int, opts EffectOpts) error {
 	t := float64(frame) * float64(opts.Speed) * 0.02
 	factor := (math.Sin(t) + 1.0) / 2.0
 	cr := byte(float64(opts.R) * factor)
 	cg := byte(float64(opts.G) * factor)
 	cb := byte(float64(opts.B) * factor)
-	_ = ctrl.SetAllKeys(cr, cg, cb)
+	return ctrl.SetAllKeys(cr, cg, cb)
 }
 
 // ColorWave is a brightness wave that moves across columns.
-func ColorWave(ctrl Controller, frame int, opts EffectOpts) {
+func ColorWave(ctrl Controller, frame int, opts EffectOpts) error {
 	rows, cols := ctrl.Rows(), ctrl.Cols()
 	colorMap := make(map[[2]int][3]byte, rows*cols)
 	t := float64(frame) * float64(opts.Speed) * 0.03
@@ -143,7 +217,7 @@ func ColorWave(ctrl Controller, frame int, opts EffectOpts) {
 			}
 		}
 	}
-	_ = ctrl.SetKeyMap(colorMap)
+	return ctrl.SetKeyMap(colorMap)
 }
 
 // SoftwareEffects maps effect names to their functions.

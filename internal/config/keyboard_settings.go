@@ -20,15 +20,16 @@ import (
 // AVELLCC_THEME_USE_KEYBOARD_RGB. A tunable that only exists inside a hook
 // script is a tunable nobody finds, and a file is at least a place to look.
 //
-// FINISHING THAT ARGUMENT IS STILL OPEN, and saying otherwise here would be
-// the same defect in a new file: `avellcc lightbar --show-config`
-// (showLightbarConfig, cmd/lightbar_settings.go) prints [theme] and [pulse]
-// field by field and stops there, and settingFields() in
-// lightbar_settings_set.go knows no keyboard.* key, so
-// `avellcc lightbar config set keyboard.brightness 3` does not exist either.
-// Today these three are discovered by opening lightbar.toml. Both are small
-// — a handful of Printf lines and one entry per field — and both are what
-// makes this comment's premise true.
+// THAT ARGUMENT IS FINISHED, and both human surfaces now hold it up:
+// showLightbarConfig (cmd/lightbar_settings.go) prints [keyboard] field by
+// field alongside [theme] and [pulse], and settingFields() in
+// lightbar_settings_set.go carries keyboard.enabled, keyboard.brightness and
+// keyboard.color_key, so `avellcc lightbar config set keyboard.brightness 3`
+// works. Neither is left to good intentions: the tests are driven by reflection
+// over the toml tags of this struct, so a FOURTH field added here without a
+// Printf there and an entry in settingFields() turns them red instead of
+// quietly becoming another value that only exists inside a file. `config show
+// --json` never had the gap — it serialises this struct whole.
 type KeyboardSettings struct {
 	Enabled    bool   `toml:"enabled" json:"enabled"`
 	Brightness int    `toml:"brightness" json:"brightness"`

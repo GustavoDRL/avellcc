@@ -13,8 +13,27 @@ AVELLCC="${AVELLCC_BIN:-$HOME/.local/bin/avellcc}"
 # Give the USB HID device time to re-enumerate before talking to it.
 RESUME_DELAY="${AVELLCC_RESUME_DELAY:-2}"
 
+# reload re-applies the saved state and SAYS SO when the hardware refused.
+#
+# This used to be `"$AVELLCC" reload >/dev/null 2>&1 || true`, which threw away
+# both halves of the diagnosis: the aggregated errors.Join that `avellcc reload`
+# builds — the list of which writes the keyboard rejected — and the exit code
+# that says any of them did. It threw them away on the resume path, which is
+# exactly the path where the keyboard comes back dark; a user with a blank
+# keyboard after a suspend had nothing at all in the journal to look at.
+#
+# The redirection stays in the success case: a working resume must not put a
+# line in the journal every time the lid is opened. And nothing here can abort
+# the monitor — `set -e` is deliberately not on (line 10 is `set -uo pipefail`),
+# and the capture makes the exit code a value rather than a failed command.
 reload() {
-	"$AVELLCC" reload >/dev/null 2>&1 || true
+	local saida rc
+	saida="$("$AVELLCC" reload 2>&1)"
+	rc=$?
+	if ((rc != 0)); then
+		printf 'avellcc-resume-monitor: %s reload falhou (rc=%d): %s\n' \
+			"$AVELLCC" "$rc" "${saida:-sem saida}" >&2
+	fi
 }
 
 # consume_sleep_events reads dbus-monitor output on stdin. PrepareForSleep

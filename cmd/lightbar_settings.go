@@ -113,6 +113,18 @@ func showLightbarConfig(cmd *cobra.Command) error {
 	fmt.Printf("  input_method   = %q%s\n", settings.Pulse.InputMethod, source("pulse-input-method"))
 	fmt.Printf("  input_source   = %q%s\n", settings.Pulse.InputSource, source("pulse-input-source"))
 
+	// [keyboard] rides in the same file (see internal/config/keyboard_settings.go)
+	// and used to be invisible here: this function printed [theme] and [pulse]
+	// and stopped, so the only way to discover the three keyboard values was to
+	// open lightbar.toml. A tunable nobody can list is a tunable nobody finds,
+	// which is the very argument that moved them out of the hook's environment
+	// variables. No source() on these: `avellcc lightbar` has no keyboard flags
+	// to override them with, so the file is always where they came from.
+	fmt.Println("\n[keyboard]")
+	fmt.Printf("  enabled        = %v\n", settings.Keyboard.Enabled)
+	fmt.Printf("  brightness     = %d\n", settings.Keyboard.Brightness)
+	fmt.Printf("  color_key      = %q\n", settings.Keyboard.ColorKey)
+
 	// What the settings resolve to on the theme in force is the part that is
 	// hard to predict from the file alone.
 	if palette, err := omarchy.CurrentPalette(); err == nil {
@@ -124,14 +136,20 @@ func showLightbarConfig(cmd *cobra.Command) error {
 		fmt.Printf("\nCurrent theme could not be read: %v\n", err)
 	}
 
-	if !settings.Pulse.Enabled || !settings.Theme.Enabled {
-		var off []string
-		if !settings.Theme.Enabled {
-			off = append(off, "theme")
-		}
-		if !settings.Pulse.Enabled {
-			off = append(off, "pulse")
-		}
+	// The summary line has to name every section that has an `enabled`, or a
+	// section left out of it reads as "on" to anyone who trusts the summary
+	// over the fields above.
+	var off []string
+	if !settings.Theme.Enabled {
+		off = append(off, "theme")
+	}
+	if !settings.Pulse.Enabled {
+		off = append(off, "pulse")
+	}
+	if !settings.Keyboard.Enabled {
+		off = append(off, "keyboard")
+	}
+	if len(off) > 0 {
 		fmt.Printf("\nDisabled: %s\n", strings.Join(off, ", "))
 	}
 	return nil

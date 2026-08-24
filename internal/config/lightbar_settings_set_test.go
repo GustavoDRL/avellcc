@@ -180,6 +180,9 @@ func TestEveryKeyRoundTrips(t *testing.T) {
 		"pulse.player":         "mpv",
 		"pulse.input_method":   "pulse",
 		"pulse.input_source":   "default",
+		"keyboard.enabled":     "false",
+		"keyboard.brightness":  "3",
+		"keyboard.color_key":   "bright_magenta",
 	}
 	if len(values) != len(SettingKeys()) {
 		t.Fatalf("this test covers %d keys but there are %d: %v",

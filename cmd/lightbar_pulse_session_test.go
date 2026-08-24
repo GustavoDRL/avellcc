@@ -93,8 +93,23 @@ func TestSessionDoesNotRaceOnPlaybackFlag(t *testing.T) {
 // A stop must end the session promptly even when no frame arrives, which is
 // what a pause during silence looks like: cava stays alive and quiet.
 func TestSessionStopsWithoutWaitingForAFrame(t *testing.T) {
-	// This cava emits one frame and then goes silent forever.
-	fakeCava(t, "#!/bin/sh\nprintf '\\0\\0\\0\\0\\0\\0\\0\\0\\0\\0\\0\\0\\0\\0\\0\\0\\0\\0'\nsleep 3600\n")
+	// A cava that never emits a frame and never exits, which is what a pause
+	// during silence gives the daemon. Two details are load-bearing:
+	//
+	//   - NO frame. An earlier version printed one, and that frame failed the
+	//     write on /dev/null — so the session could leave by the write-error
+	//     path instead of the stop path, and the test then proved nothing about
+	//     stopping. Measured: with the frame, deleting the `cancel()` from the
+	//     stop branch of runCavaSession left this test GREEN.
+	//   - `exec`, so the quiet cava is one process rather than a shell with a
+	//     `sleep` child. exec.CommandContext kills the process it started; an
+	//     orphaned `sleep` keeps the stdout pipe open, and the session's cleanup
+	//     then blocks in io.Copy for the full hour. Measured directly: the
+	//     forking shell took over 40 s (still running when the probe gave up),
+	//     `exec` took 301 ms. THAT is what the 5-second deadline this test used
+	//     to carry was catching one run in seven — not scheduler jitter, an
+	//     orphan holding the pipe.
+	fakeCava(t, "#!/bin/sh\nexec sleep 3600\n")
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 
@@ -104,21 +119,38 @@ func TestSessionStopsWithoutWaitingForAFrame(t *testing.T) {
 	playing := make(chan bool, 4)
 	isPlaying := true
 	settings := defaultTestSettings(t)
+	// Buffered and sent before the session starts, so the stop is already
+	// waiting when the session's watcher goroutine reaches its first receive.
+	playing <- false
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		// The first frame fails the write on /dev/null, so send the stop first
-		// and let the session pick it up without another frame.
-		playing <- false
 		_, _ = runCavaSession(ctx, &cobra.Command{}, nullController(t),
 			testMapper(), playing, &isPlaying, &settings, "org.mpris.MediaPlayer2.test")
 	}()
 
+	// The question is CAUSAL, not a stopwatch: did the stop end the session, or
+	// did the context expire while it sat waiting for a frame that this cava
+	// will not send for an hour? A broken session can only leave runCavaSession
+	// when sessionCtx is done, so `ctx.Err() != nil` on the way out is exactly
+	// the defect, and a slow machine cannot fake it.
+	//
+	// The 5-second wall-clock deadline this replaces was measured failing once
+	// in seven runs under CPU contention on a healthy build. A red that means
+	// "the machine was busy" teaches everyone to ignore red, which is worse
+	// than having no test at all.
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the session did not end after playback stopped; it is waiting for a frame")
+		if ctx.Err() != nil {
+			t.Fatal("the session only ended when the context expired; " +
+				"it was waiting for a frame instead of acting on the stop")
+		}
+	case <-time.After(time.Minute):
+		// Only reachable if the session ignores its context too, which no
+		// amount of load can produce. Present so a hang is a failure rather
+		// than a test binary that never returns.
+		t.Fatal("the session never ended at all, context deadline included")
 	}
 	if isPlaying {
 		t.Error("the caller's playback flag was not updated by the session")

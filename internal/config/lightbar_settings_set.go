@@ -69,6 +69,21 @@ func settingFields() map[string]settingField {
 		{"pulse", "input_source", "string",
 			func(s *LightbarSettings, v any) { s.Pulse.InputSource = v.(string) },
 			func(s LightbarSettings) any { return s.Pulse.InputSource }},
+
+		// [keyboard] lives in the same file and was settable only by hand: the
+		// list stopped at pulse.*, so `config set keyboard.brightness 3` came
+		// back "unknown setting" for a key the file documents. One entry per
+		// field of KeyboardSettings, and a test in this package fails if a
+		// fourth field is ever added without a fourth entry here.
+		{"keyboard", "enabled", "bool",
+			func(s *LightbarSettings, v any) { s.Keyboard.Enabled = v.(bool) },
+			func(s LightbarSettings) any { return s.Keyboard.Enabled }},
+		{"keyboard", "brightness", "int",
+			func(s *LightbarSettings, v any) { s.Keyboard.Brightness = v.(int) },
+			func(s LightbarSettings) any { return s.Keyboard.Brightness }},
+		{"keyboard", "color_key", "string",
+			func(s *LightbarSettings, v any) { s.Keyboard.ColorKey = v.(string) },
+			func(s LightbarSettings) any { return s.Keyboard.ColorKey }},
 	}
 
 	byName := make(map[string]settingField, len(fields))

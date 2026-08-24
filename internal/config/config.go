@@ -364,11 +364,37 @@ func MergeLightbarState(state map[string]any, updates map[string]any) map[string
 			merged[k] = v
 		}
 	}
-	// Sync effect ↔ effect_code
-	if effect, ok := merged["effect"].(string); ok {
-		if code, ok := lightbar.X58EffectCodes[effect]; ok {
-			merged["effect_code"] = float64(code)
+	// Sincroniza effect ↔ effect_code. Quem manda e o lado que ACABOU de chegar
+	// em updates; antes o nome guardado mandava sempre, e isso custava duas
+	// coisas de uma vez:
+	//
+	//   - `--effect-code 7` sobre um estado com effect="breathe" era desfeito:
+	//     o nome salvo reescrevia o codigo de volta para 6. E nao era so o
+	//     arquivo — runLightbar aplica o mapa que sai daqui, entao o codigo 6
+	//     era o que ia para o dispositivo. O usuario pedia uma coisa e via
+	//     outra, sem uma linha de erro.
+	//   - quando o codigo mudava para um valor que o nome salvo nao descreve, o
+	//     nome ficava para tras e o "Lightbar updated:" passava a mentir.
+	//
+	// Indexar updates nil devolve nil, entao o caminho do reload (updates=nil)
+	// cai no ramo antigo de proposito: la o nome salvo AINDA e quem repara um
+	// effect_code invalido.
+	nameUpdated := updates["effect"] != nil
+	codeUpdated := updates["effect_code"] != nil
+
+	if nameUpdated || !codeUpdated {
+		if effect, ok := merged["effect"].(string); ok {
+			if code, ok := lightbar.X58EffectCodes[effect]; ok {
+				merged["effect_code"] = float64(code)
+			}
 		}
+	}
+	if codeUpdated && !nameUpdated {
+		// Foi o codigo que mudou: o nome antigo perde a vez. "?" e o que o
+		// status ja imprime para um efeito que nao sabe nomear, e e a resposta
+		// honesta quando o codigo cru nao tem nome conhecido — melhor do que
+		// continuar exibindo o nome de outro efeito.
+		merged["effect"] = "?"
 	}
 	if code, ok := toFloat(merged["effect_code"]); ok {
 		if name, ok := lightbar.X58EffectNames[byte(code)]; ok {
