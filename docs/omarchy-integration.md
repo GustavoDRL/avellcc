@@ -519,12 +519,15 @@ all, so the group is what makes a systemd unit work.
 | `omarchy/50-avellcc-keyboard` | the keyboard theme-set hook |
 | `omarchy/51-avellcc-lightbar` | the light bar theme-set hook |
 | `omarchy/avellcc-pulse.service` | user unit for the music pulse |
+| `omarchy/avellcc-pulse-failed.service` | says so when the pulse gives up |
 | `internal/config/lightbar_settings.go` | the settings file, its defaults and validation |
 | `internal/config/lightbar_settings_set.go` | the comment-preserving writer behind `config set` |
 | `omarchy/plugins/disney.lightbar/` | the bar widget and its panel |
 | `omarchy/avellcc-resume-monitor` | login and resume restore |
 | `omarchy/avellcc-keyboard.service` | user unit that runs the monitor |
 | `udev/60-avellcc-storm470.rules` | hidraw access |
+| `omarchy/60-avellcc-healthcheck.hook` | post-update check that hidraw access survived |
+| `omarchy/61-migration-report.hook` | post-update list of the migrations that ran |
 
 ## Install
 
@@ -536,10 +539,32 @@ install -Dm644 omarchy/avellcc-keyboard.service ~/.config/systemd/user/avellcc-k
 systemctl --user daemon-reload && systemctl --user enable --now avellcc-keyboard.service
 ```
 
-The pulse is opt-in and needs cava:
+The pulse is opt-in and needs cava. Install its failure notifier alongside it:
+the unit gives up after six failures in a minute rather than restarting forever,
+and that is only useful if something says so.
 
 ```bash
 omarchy pkg add cava
 install -Dm644 omarchy/avellcc-pulse.service ~/.config/systemd/user/avellcc-pulse.service
+install -Dm644 omarchy/avellcc-pulse-failed.service ~/.config/systemd/user/avellcc-pulse-failed.service
 systemctl --user daemon-reload && systemctl --user enable --now avellcc-pulse.service
 ```
+
+### Surviving the next Omarchy update
+
+On 2026-08-31 an Omarchy migration removed the user from the `input` group and
+took every LED on this machine with it, silently, for fourteen hours: the theme
+hooks swallow their own errors by design, and the pulse daemon just restarted
+every five seconds without anyone noticing. These two hooks run right after
+`omarchy-migrate` on every `omarchy update` — the first re-checks that the udev
+rule and the hidraw ACL are still there (restoring the rule with `sudo -n` if it
+went missing), the second prints the headline of every migration that just ran,
+which is the line that would have given the game away that day.
+
+```bash
+install -Dm755 omarchy/60-avellcc-healthcheck.hook ~/.config/omarchy/hooks/post-update.d/60-avellcc-healthcheck.hook
+install -Dm755 omarchy/61-migration-report.hook ~/.config/omarchy/hooks/post-update.d/61-migration-report.hook
+```
+
+The healthcheck restores the rule from `~/Work/avellcc/udev/` by default; set
+`AVELLCC_UDEV_SOURCE` if your checkout lives elsewhere.

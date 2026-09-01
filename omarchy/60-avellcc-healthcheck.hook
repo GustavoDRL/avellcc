@@ -1,0 +1,115 @@
+#!/bin/bash
+#
+# Verify that avellcc can still reach the Storm 470's HID controllers, right
+# after `omarchy update` has run its migrations.
+#
+# Why this exists: on 2026-08-31 the Omarchy 4.0.2 migration 1787865477 ("Drop
+# the default input group grant, which allowed unprivileged keylogging") ran
+# `gpasswd -d $USER input`. That group was the only thing granting access to
+# /dev/hidraw0 (keyboard, ITE 8291) and /dev/hidraw1 (light bar, ITE 8233), so
+# the keyboard RGB, the light bar and both theme hooks died at once — silently,
+# because 50-avellcc-keyboard and 51-avellcc-lightbar send everything to
+# /dev/null and always exit 0 by design. It took 14 hours and 7,727 restarts of
+# avellcc-pulse.service to notice.
+#
+# The access path no longer depends on the `input` group: the udev rule is
+# numbered 60- so its TAG+="uaccess" is in place before 73-seat-late.rules
+# evaluates it, and the ACL lands on the active seat's user. But a future
+# migration could still remove the rule file — 1788102906 already removes
+# things from /etc/udev/rules.d with sudo — so this checks both halves and
+# repairs the one it can.
+#
+# omarchy-hook runs this with `bash "$hook" || echo "Hook failed: ..."`, so a
+# failure here cannot break an update. It still exits 0 on every path.
+
+set -uo pipefail
+
+RULE_NAME="60-avellcc-storm470.rules"
+RULE_INSTALLED="/etc/udev/rules.d/$RULE_NAME"
+# Where to restore the rule from. Point AVELLCC_UDEV_SOURCE at your checkout
+# if it does not live at the default path.
+RULE_SOURCE="${AVELLCC_UDEV_SOURCE:-$HOME/Work/avellcc/udev/$RULE_NAME}"
+AVELLCC="${AVELLCC_BIN:-$HOME/.local/bin/avellcc}"
+
+# Nothing installed, nothing to check. Keeps the hook harmless on a machine
+# where avellcc was removed or never set up.
+[[ -x $AVELLCC ]] || exit 0
+
+notify() {
+  local urgency=$1 headline=$2 body=$3
+  if command -v omarchy-notification-send >/dev/null 2>&1; then
+    omarchy-notification-send -u "$urgency" -g 󰌵 "$headline" "$body"
+  fi
+  echo "$headline — $body" >&2
+}
+
+# The hidraw number is not stable, so find the device by its USB ids rather
+# than assuming hidraw0/hidraw1. Prints nothing when the hardware is absent.
+find_hidraw() {
+  local want_product=$1 dev id
+  for dev in /sys/class/hidraw/hidraw*; do
+    [[ -e $dev/device/uevent ]] || continue
+    id=$(grep -m1 '^HID_ID=' "$dev/device/uevent" 2>/dev/null)
+    # HID_ID=0003:0000048D:00007001 — vendor 048d, then the product.
+    if [[ ${id^^} == *":0000048D:0000${want_product^^}" ]]; then
+      echo "/dev/$(basename "$dev")"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# --- Half 1: the rule file itself -------------------------------------------
+
+if [[ ! -f $RULE_INSTALLED ]]; then
+  if [[ ! -f $RULE_SOURCE ]]; then
+    notify critical "avellcc: regra udev sumiu" \
+      "$RULE_INSTALLED foi removido e não há cópia em $RULE_SOURCE para restaurar. O RGB do teclado e a barra de LED vão parar no próximo boot."
+    exit 0
+  fi
+
+  # -n so a hook running without a cached sudo credential reports instead of
+  # hanging on a password prompt nobody is watching. `omarchy update` has just
+  # run pacman through sudo, so in the normal case the credential is cached.
+  rule_missing=1
+  if sudo -n install -m 644 "$RULE_SOURCE" "$RULE_INSTALLED" 2>/dev/null &&
+    sudo -n udevadm control --reload-rules 2>/dev/null &&
+    sudo -n udevadm trigger --subsystem-match=hidraw 2>/dev/null; then
+    rule_missing=0
+    notify critical "avellcc: regra udev restaurada" \
+      "Algo removeu $RULE_INSTALLED durante este update. Foi reinstalada de $RULE_SOURCE. Confira se uma migration do Omarchy tinha um motivo para removê-la: omarchy-migrate --pending"
+  else
+    notify critical "avellcc: regra udev removida" \
+      "$RULE_INSTALLED sumiu neste update e o sudo não estava disponível para restaurar. Rode: sudo install -m 644 $RULE_SOURCE $RULE_INSTALLED && sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=hidraw"
+  fi
+fi
+
+# --- Half 2: the ACL that actually grants access -----------------------------
+#
+# The rule can be present and correct while the access is still gone: that is
+# exactly what the 99- prefix did for months. Check the outcome, not the intent.
+
+# Uma regra ausente que não pôde ser restaurada já explica a falta de ACL. Sem
+# isto, a mesma causa raiz rende duas notificações críticas com textos
+# diferentes, o que faz o alarme parecer dois problemas.
+rule_missing=${rule_missing:-0}
+
+missing=()
+for spec in "600b:teclado (ITE 8291)" "7001:barra de LED (ITE 8233)"; do
+  product=${spec%%:*}
+  label=${spec#*:}
+
+  node=$(find_hidraw "$product") || continue # hardware absent: not a failure
+  [[ -r $node && -w $node ]] && continue
+
+  missing+=("$label em $node")
+done
+
+if ((${#missing[@]} > 0)) && ((rule_missing == 0)); then
+  # ${missing[*]} junta com o primeiro caractere de IFS; sem isto duas entradas
+  # saem grudadas numa frase corrida.
+  notify critical "avellcc: sem acesso ao hardware" \
+    "Sem permissão em: $(IFS='|' && echo "${missing[*]}" | sed 's/|/; /g'). A ACL uaccess não foi aplicada. Verifique o prefixo do arquivo em /etc/udev/rules.d (precisa ordenar antes de 73-seat-late.rules) com: getfacl /dev/hidraw*"
+fi
+
+exit 0

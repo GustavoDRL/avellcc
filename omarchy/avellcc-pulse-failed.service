@@ -1,0 +1,43 @@
+[Unit]
+Description=Notify that the Avell lightbar pulse daemon gave up
+Documentation=https://github.com/hugo-andrade/avellcc
+# Pulled in by avellcc-pulse.service's OnFailure=. That unit now has a
+# StartLimit, so it reaches `failed` in about 30s instead of restarting every
+# 5s forever the way it did on 2026-08-31 (7,727 cycles overnight, nobody
+# looking). Failing loudly is only useful if something says so.
+
+# One notification per incident, not one per restart cycle.
+#
+# avellcc-pulse.service leaves RestartMode at its default (`normal`), so it
+# transitions through `failed` on EVERY auto-restart, not just the last one --
+# and OnFailure= fires on every entry into `failed`. Measured on this machine
+# with throwaway units (/bin/false, RestartSec=1, StartLimitBurst=6): 5
+# activations of this unit for a single incident. Start rate limiting applies
+# to all starts, not only Restart=-driven ones, and counts refused starts too,
+# so a burst of 1 collapses those 5 into one delivered notification and
+# silently drops the rest. Same experiment with the limit in place: 1.
+#
+# The 300s window is the de-duplication period: a genuinely new failure more
+# than five minutes later notifies again.
+StartLimitIntervalSec=300
+StartLimitBurst=1
+
+# The notification daemon lives in the graphical session. avellcc-pulse.service
+# carries a comment about having been bitten by exactly this race at login;
+# without the ordering, a failure early in the session would try to notify a
+# bus nobody is listening on -- and a notifier that fails silently rebuilds the
+# blind spot this whole unit exists to remove.
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+# Wrapped in sh -c only so delivery failure leaves a durable trace: a bare
+# ExecStart that cannot reach the notification daemon fails with nothing but a
+# journal line, which is precisely the silence being designed out. The log file
+# is what a later `omarchy update` healthcheck or a puzzled human can find.
+ExecStart=/bin/sh -c 'omarchy-notification-send -u critical -g 󰌵 \
+  "Barra de LED parou" \
+  "avellcc-pulse desistiu depois de falhar em sequência. Veja o motivo com: journalctl --user -u avellcc-pulse -n 20" \
+  || { mkdir -p "$HOME/.local/state/avellcc"; \
+       printf "%%s avellcc-pulse falhou e a notificação não pôde ser entregue\\n" \
+         "$(date -Is)" >> "$HOME/.local/state/avellcc/notify-delivery-failures.log"; }'

@@ -1,0 +1,72 @@
+#!/bin/bash
+#
+# Report which Omarchy migrations ran in this update, by name and headline.
+#
+# Why after and not before: `omarchy update` runs omarchy-update-system-pkgs
+# (pacman -Syu) and only then omarchy-migrate. The new version's migration
+# scripts arrive *with* that package — they are not on disk beforehand, so
+# there is no earlier moment at which "what is about to run" can be read. This
+# is the first point where the question has an answer.
+#
+# What this would have shown on 2026-08-31: ten migrations at once, including
+# "Drop the default input group grant, which allowed unprivileged keylogging",
+# which silently cost the machine its keyboard RGB and light bar for 14 hours.
+# Migrations are arbitrary bash run with sudo; seeing their headlines once per
+# update is cheap.
+
+set -uo pipefail
+
+MIGRATIONS_DIR="${OMARCHY_PATH:-/usr/share/omarchy}/migrations"
+STATE_DIR="${OMARCHY_MIGRATION_STATE:-$HOME/.local/state/omarchy/migrations}"
+SEEN_FILE="$HOME/.local/state/omarchy/migration-report-seen"
+
+[[ -d $STATE_DIR ]] || exit 0
+
+current=$(cd "$STATE_DIR" 2>/dev/null && ls -1 2>/dev/null | sort) || exit 0
+
+# First run seeds the baseline rather than reporting all 96 as if they were new.
+if [[ ! -f $SEEN_FILE ]]; then
+  mkdir -p "$(dirname "$SEEN_FILE")"
+  printf '%s\n' "$current" >"$SEEN_FILE"
+  exit 0
+fi
+
+new=$(comm -13 <(sort "$SEEN_FILE") <(printf '%s\n' "$current"))
+
+# O seen-file é atualizado só no fim, depois de relatar. Se este hook morrer no
+# meio (SIGHUP ao fechar o terminal do update, OOM, reboot forçado), as mesmas
+# migrations são relatadas de novo na próxima vez em vez de sumirem para sempre
+# — perder o relatório para a mesma classe de evento que ele existe para tornar
+# visível seria o pior desfecho possível.
+if [[ -z $new ]]; then
+  printf '%s\n' "$current" >"$SEEN_FILE"
+  exit 0
+fi
+
+count=$(printf '%s\n' "$new" | grep -c .)
+echo ""
+echo -e "\e[33mOmarchy aplicou $count migration(s) neste update:\e[0m"
+
+headlines=""
+while IFS= read -r marker; do
+  [[ -n $marker ]] || continue
+  script="$MIGRATIONS_DIR/$marker"
+
+  # Every migration opens with `echo "<what it does>"`. Take that literal
+  # rather than executing anything.
+  headline=$(sed -n '1s/^echo "\(.*\)"$/\1/p' "$script" 2>/dev/null)
+  [[ -n $headline ]] || headline="(sem descrição em $marker)"
+
+  echo "  • ${marker%.sh}: $headline"
+  headlines+="• $headline"$'\n'
+done <<<"$new"
+echo ""
+
+if command -v omarchy-notification-send >/dev/null 2>&1; then
+  omarchy-notification-send -u normal -g 󰚰 \
+    "$count migration(s) do Omarchy aplicadas" "${headlines%$'\n'}"
+fi
+
+printf '%s\n' "$current" >"$SEEN_FILE"
+
+exit 0

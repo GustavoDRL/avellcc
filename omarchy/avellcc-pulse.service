@@ -15,6 +15,16 @@ Requires=dbus.socket
 After=graphical-session.target pipewire.service
 PartOf=graphical-session.target
 
+# Give up instead of spinning forever. On 2026-08-31 an Omarchy migration
+# removed the user from the `input` group, the hidraw devices became
+# unreachable, and this unit restarted every 5s for 7,700+ cycles overnight,
+# each one logging the same permission error. Six failures in a minute is a
+# problem that another restart will not solve: fail loudly and stay failed.
+StartLimitIntervalSec=60
+StartLimitBurst=6
+# Reaching `failed` in silence is what let this go unnoticed for 14 hours.
+OnFailure=avellcc-pulse-failed.service
+
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/avellcc lightbar --pulse
