@@ -51,7 +51,7 @@ Three things about this hardware account for most of the work:
 ```bash
 # udev — GROUP="input" also covers system services, which get no uaccess ACL,
 # and --action=add matters: a plain trigger sets the mode but fires no ACL
-sudo install -m 644 udev/99-avellcc-storm470.rules /etc/udev/rules.d/
+sudo install -m 644 udev/60-avellcc-storm470.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules
 sudo udevadm trigger --action=add --subsystem-match=hidraw
 

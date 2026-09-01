@@ -524,7 +524,7 @@ all, so the group is what makes a systemd unit work.
 | `omarchy/plugins/disney.lightbar/` | the bar widget and its panel |
 | `omarchy/avellcc-resume-monitor` | login and resume restore |
 | `omarchy/avellcc-keyboard.service` | user unit that runs the monitor |
-| `udev/99-avellcc-storm470.rules` | hidraw access |
+| `udev/60-avellcc-storm470.rules` | hidraw access |
 
 ## Install
 

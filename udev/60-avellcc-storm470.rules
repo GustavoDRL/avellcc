@@ -1,0 +1,67 @@
+# Avell Storm 470 (Uniwill/TongFang barebone) — ITE HID controllers
+# Grants non-root access to the per-key RGB keyboard controller and the
+# chassis light bar.
+#
+# The 60- prefix is load-bearing, not cosmetic. TAG+="uaccess" only does
+# anything if the tag exists by the time /usr/lib/udev/rules.d/73-seat-late.rules
+# evaluates `TAG=="uaccess" ... RUN{builtin}+="uaccess"`. udev reads rule files
+# in filename order and matches TAG== against the tags added so far in that
+# pass, so this file must sort BEFORE 73-. It was 99- until 2026-09-01, which
+# meant that match was always false, the builtin was never queued, and no ACL
+# was ever set — the devices were reachable only through GROUP="input".
+#
+# That mattered on 2026-08-31, when Omarchy 4.0.2's migration 1787865477
+# ("Drop the default input group grant, which allowed unprivileged keylogging")
+# ran `gpasswd -d $USER input` and every avellcc call started failing with
+# "open /dev/hidraw1: permission denied". Do not fix that by rejoining `input`:
+# membership there also grants raw read/write on /dev/input/event*. uaccess
+# grants only the user of the currently active seat, which is what we want.
+#
+# GROUP="root", MODE="0660", because uaccess is now the only intended path.
+# The rule used to carry GROUP="input" as a fallback for system services and
+# non-seat sessions; an audit on 2026-09-01 found no such consumer on this
+# machine (the `input` group has zero members, no unit sets Group=input, and
+# the user manager has Linger=no), so the fallback protected nothing while
+# silently arming itself for whenever something else — a future ydotool or
+# xpadneo install, per that migration's own carve-out — puts an account back
+# in `input`. GROUP="root" grants nobody anything new: root already bypasses
+# these checks.
+#
+# MODE stays 0660 and must. The obvious tightening — dropping to 0600, since
+# only the ACL is supposed to matter — silently revokes the ACL instead of
+# hardening it. POSIX ACL semantics make chmod set the *mask* from the group
+# bits, so 0600 leaves `mask::---` and every named entry reads
+# `user:disney:rw- #effective:---`: permission denied, with an ACL that still
+# looks correct at a glance. Tried on 2026-09-01, and it broke exactly that
+# way. Every uaccess-managed device on this system agrees — /dev/dri/card1,
+# /dev/snd/controlC0 and the rest are all 0660 with mask=rw-.
+#
+# Only the two product ids present on this machine are listed. tuxedo-drivers'
+# src/ite_8291_lb/ite_8291_lb.c names two more siblings for this protocol
+# (0x7000, 0x6010) and avellcc's PIDs8233 still probes them, but they were
+# never verified against real hardware or against any public id database, so
+# shipping udev matches for them meant granting access to devices nobody has
+# inspected. A machine that actually has one should add its line after checking
+# that device's interface layout — see below for what to check.
+#
+# What to check before adding a product id: each of these controllers declares
+# TWO interfaces — a boot-keyboard stub (bInterfaceClass 03, SubClass 01,
+# Protocol 01) and the vendor interface the LEDs live on (03/00/00). This rule
+# matches on vendor and product only, so it would grant access to every hidraw
+# node the device exposes, keyboard interface included. That is safe here, and
+# only here, because on both 048d:600b and 048d:7001 the boot-keyboard
+# interface declares bNumEndpoints=00: usbhid cannot bind an interface with no
+# endpoints, so it never gets a hidraw node and can never carry a keystroke.
+# Verified on hardware 2026-09-01. On a controller where that interface has
+# endpoints, narrow the rule with ENV{ID_USB_INTERFACE_NUM} (a property of the
+# hidraw node itself) — note that ATTRS{bInterfaceProtocol} does NOT work here:
+# `man udev` requires all ATTRS in one rule to match the same device, and
+# idVendor lives on the USB device while bInterfaceProtocol lives on the
+# interface. Matching on ID_USB_INTERFACE_NUM also requires sorting after
+# 60-persistent-hidraw.rules, which is what runs the usb_id builtin.
+
+# ITE 8291 (rev 3 family) — keyboard RGB LED controller
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="048d", ATTRS{idProduct}=="600b", GROUP="root", MODE="0660", TAG+="uaccess"
+
+# ITE 8233 — chassis light bar (see docs/storm470-lightbar.md)
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="048d", ATTRS{idProduct}=="7001", GROUP="root", MODE="0660", TAG+="uaccess"
